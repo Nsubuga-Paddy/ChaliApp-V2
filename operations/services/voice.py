@@ -13,6 +13,12 @@ def _ga_realtime_model(model_name):
     return model_name or 'gpt-realtime-2'
 
 
+def _transcription_model(model_name):
+    if not model_name or model_name == 'whisper-1':
+        return 'gpt-4o-transcribe'
+    return model_name
+
+
 def _safety_identifier(conversation):
     raw = f'company:{conversation.company_id}:customer:{conversation.customer_id}'
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
@@ -96,7 +102,8 @@ def create_realtime_session(conversation):
         'audio': {
             'input': {
                 'transcription': {
-                    'model': ai_config.transcription_model,
+                    'model': _transcription_model(ai_config.transcription_model),
+                    'language': 'en',
                 },
             },
             'output': {

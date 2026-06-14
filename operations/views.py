@@ -13,6 +13,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from operations.services.audio import process_audio_message
+from operations.services.call_transcript import (
+    build_chat_call_summary_message,
+    process_call_transcript,
+)
 from operations.services.text import _execute_tool, generate_text_reply, stream_text_reply
 from operations.services.voice import create_realtime_session
 from tenants.permissions import HasCompanyAccess, IsCompanyAgentOrAdmin, IsStaffUser
@@ -374,24 +378,52 @@ class EndCallSessionView(APIView):
         call.duration_seconds = serializer.validated_data.get('duration_seconds')
         if serializer.validated_data.get('openai_session_id'):
             call.openai_session_id = serializer.validated_data['openai_session_id']
+
+        processed = process_call_transcript(
+            call.transcript,
+            company_name=conversation.company.name,
+            duration_seconds=call.duration_seconds,
+        )
+        call.transcript = processed.get('transcript') or call.transcript
+        call.metadata = {
+            **(call.metadata or {}),
+            'summary': processed.get('summary'),
+            'customer_issue': processed.get('customer_issue'),
+            'solution': processed.get('solution'),
+            'formatted_transcript': processed.get('formatted_transcript'),
+        }
         call.save()
 
-        if call.transcript:
-            summary_lines = [
-                f"{entry.get('role', 'unknown')}: {entry.get('text', '')}"
-                for entry in call.transcript
-                if entry.get('text')
-            ]
-            if summary_lines:
-                Message.objects.create(
-                    conversation=conversation,
-                    role=Message.Role.SYSTEM,
-                    content_type=Message.ContentType.TEXT,
-                    text_content='Voice call transcript:\n' + '\n'.join(summary_lines),
-                    metadata={'call_session_id': call.id},
-                )
+        if processed.get('formatted_transcript') or processed.get('summary'):
+            Message.objects.create(
+                conversation=conversation,
+                role=Message.Role.SYSTEM,
+                content_type=Message.ContentType.TEXT,
+                text_content=build_chat_call_summary_message(
+                    processed,
+                    duration_seconds=call.duration_seconds,
+                ),
+                metadata={
+                    'call_session_id': call.id,
+                    'call_summary': True,
+                    'customer_issue': processed.get('customer_issue'),
+                    'solution': processed.get('solution'),
+                    'summary': processed.get('summary'),
+                    'formatted_transcript': processed.get('formatted_transcript'),
+                },
+            )
 
-        return Response({'status': 'completed', 'call_session_id': call.id})
+        return Response(
+            {
+                'status': 'completed',
+                'call_session_id': call.id,
+                'summary': processed.get('summary', ''),
+                'customer_issue': processed.get('customer_issue', ''),
+                'solution': processed.get('solution', ''),
+                'formatted_transcript': processed.get('formatted_transcript', ''),
+                'transcript': call.transcript,
+            }
+        )
 
 
 class RealtimeToolCallView(APIView):

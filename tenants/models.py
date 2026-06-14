@@ -87,7 +87,7 @@ class CompanyAIConfig(models.Model):
     )
     text_model = models.CharField(max_length=100, default='gpt-4o')
     realtime_model = models.CharField(max_length=100, default='gpt-realtime-2')
-    transcription_model = models.CharField(max_length=100, default='whisper-1')
+    transcription_model = models.CharField(max_length=100, default='gpt-4o-transcribe')
     tts_model = models.CharField(max_length=100, default='gpt-4o-mini-tts')
     tts_voice = models.CharField(
         max_length=20,

@@ -1,5 +1,6 @@
 from django.contrib import admin
 
+from .forms import CompanyAIConfigAdminForm, CompanyAIConfigInlineFormSet
 from .ingestion import index_source_document
 from .models import (
     Company,
@@ -21,7 +22,36 @@ class CompanyMembershipInline(admin.TabularInline):
 
 class CompanyAIConfigInline(admin.StackedInline):
     model = CompanyAIConfig
+    form = CompanyAIConfigAdminForm
+    formset = CompanyAIConfigInlineFormSet
     can_delete = False
+    fieldsets = (
+        (
+            None,
+            {
+                'fields': (
+                    'text_model',
+                    'realtime_model',
+                    'transcription_model',
+                    'tts_model',
+                    'tts_voice',
+                    'realtime_voice',
+                    'enabled_tools_selection',
+                    'auto_create_tickets',
+                    'temperature',
+                    'max_tokens',
+                    'default_language',
+                ),
+            },
+        ),
+        (
+            'Prompts',
+            {
+                'classes': ('collapse',),
+                'fields': ('system_prompt', 'voice_system_prompt'),
+            },
+        ),
+    )
 
 
 class KnowledgeDocumentInline(admin.TabularInline):
@@ -80,8 +110,36 @@ class CompanyMembershipAdmin(admin.ModelAdmin):
 
 @admin.register(CompanyAIConfig)
 class CompanyAIConfigAdmin(admin.ModelAdmin):
+    form = CompanyAIConfigAdminForm
     list_display = ('company', 'text_model', 'realtime_model', 'updated_at')
     search_fields = ('company__name',)
+    fieldsets = (
+        (
+            None,
+            {
+                'fields': (
+                    'company',
+                    'text_model',
+                    'realtime_model',
+                    'transcription_model',
+                    'tts_model',
+                    'tts_voice',
+                    'realtime_voice',
+                    'enabled_tools_selection',
+                    'auto_create_tickets',
+                    'temperature',
+                    'max_tokens',
+                    'default_language',
+                ),
+            },
+        ),
+        (
+            'Prompts',
+            {
+                'fields': ('system_prompt', 'voice_system_prompt'),
+            },
+        ),
+    )
 
 
 @admin.register(KnowledgeDocument)

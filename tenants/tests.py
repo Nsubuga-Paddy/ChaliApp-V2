@@ -5,12 +5,109 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from unittest.mock import Mock, patch
 
+from .forms import CompanyAIConfigAdminForm
 from .ingestion import index_legacy_document
-from .models import Company, CompanyMembership, KnowledgeChunk, KnowledgeDocument, KnowledgeWebSource
+from .models import Company, CompanyAIConfig, CompanyMembership, KnowledgeChunk, KnowledgeDocument, KnowledgeWebSource
 from .services import search_knowledge_base
 from .web_ingestion import index_web_source, refresh_due_web_sources
 
 User = get_user_model()
+
+
+class CompanyAIConfigAdminFormTests(TestCase):
+    def setUp(self):
+        self.company = Company.objects.create(
+            name='Company A',
+            slug='company-a',
+            enable_orders=False,
+            enable_bookings=False,
+        )
+        self.ai_config = self.company.ai_config
+
+    def test_form_saves_selected_tools(self):
+        form = CompanyAIConfigAdminForm(
+            data={
+                'company': self.company.pk,
+                'text_model': self.ai_config.text_model,
+                'realtime_model': self.ai_config.realtime_model,
+                'transcription_model': self.ai_config.transcription_model,
+                'tts_model': self.ai_config.tts_model,
+                'tts_voice': self.ai_config.tts_voice,
+                'realtime_voice': self.ai_config.realtime_voice,
+                'system_prompt': self.ai_config.system_prompt,
+                'voice_system_prompt': self.ai_config.voice_system_prompt,
+                'temperature': self.ai_config.temperature,
+                'max_tokens': self.ai_config.max_tokens,
+                'default_language': self.ai_config.default_language,
+                'auto_create_tickets': True,
+                'enabled_tools_selection': [
+                    'search_knowledge_base',
+                    'create_ticket',
+                ],
+            },
+            instance=self.ai_config,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        saved = form.save()
+        self.assertEqual(
+            saved.enabled_tools,
+            ['search_knowledge_base', 'create_ticket'],
+        )
+
+    def test_form_rejects_empty_tool_selection(self):
+        form = CompanyAIConfigAdminForm(
+            data={
+                'company': self.company.pk,
+                'text_model': self.ai_config.text_model,
+                'realtime_model': self.ai_config.realtime_model,
+                'transcription_model': self.ai_config.transcription_model,
+                'tts_model': self.ai_config.tts_model,
+                'tts_voice': self.ai_config.tts_voice,
+                'realtime_voice': self.ai_config.realtime_voice,
+                'system_prompt': self.ai_config.system_prompt,
+                'voice_system_prompt': self.ai_config.voice_system_prompt,
+                'temperature': self.ai_config.temperature,
+                'max_tokens': self.ai_config.max_tokens,
+                'default_language': self.ai_config.default_language,
+                'auto_create_tickets': True,
+                'enabled_tools_selection': [],
+            },
+            instance=self.ai_config,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn('enabled_tools_selection', form.errors)
+
+    def test_form_rejects_order_tool_when_orders_disabled(self):
+        form = CompanyAIConfigAdminForm(
+            data={
+                'company': self.company.pk,
+                'text_model': self.ai_config.text_model,
+                'realtime_model': self.ai_config.realtime_model,
+                'transcription_model': self.ai_config.transcription_model,
+                'tts_model': self.ai_config.tts_model,
+                'tts_voice': self.ai_config.tts_voice,
+                'realtime_voice': self.ai_config.realtime_voice,
+                'system_prompt': self.ai_config.system_prompt,
+                'voice_system_prompt': self.ai_config.voice_system_prompt,
+                'temperature': self.ai_config.temperature,
+                'max_tokens': self.ai_config.max_tokens,
+                'default_language': self.ai_config.default_language,
+                'auto_create_tickets': True,
+                'enabled_tools_selection': ['search_knowledge_base', 'lookup_order'],
+            },
+            instance=self.ai_config,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn('enabled_tools_selection', form.errors)
+
+    def test_normalize_enabled_tools_strips_unknown_values(self):
+        normalized = CompanyAIConfig.normalize_enabled_tools(
+            ['search_knowledge_base', 'invalid_tool', 'create_ticket']
+        )
+        self.assertEqual(normalized, ['search_knowledge_base', 'create_ticket'])
 
 
 @override_settings(OPENAI_API_KEY='')

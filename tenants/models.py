@@ -80,6 +80,12 @@ class CompanyAIConfig(models.Model):
         SHIMMER = 'shimmer', 'Shimmer'
         VERSE = 'verse', 'Verse'
 
+    class ToolChoice(models.TextChoices):
+        SEARCH_KNOWLEDGE_BASE = 'search_knowledge_base', 'Search knowledge base'
+        CREATE_TICKET = 'create_ticket', 'Create support ticket'
+        LOOKUP_ORDER = 'lookup_order', 'Look up order'
+        LOOKUP_BOOKING = 'lookup_booking', 'Look up booking'
+
     company = models.OneToOneField(
         Company,
         on_delete=models.CASCADE,
@@ -122,7 +128,7 @@ class CompanyAIConfig(models.Model):
     enabled_tools = models.JSONField(
         default=list,
         blank=True,
-        help_text='Tool names enabled for this company, e.g. search_knowledge_base, create_ticket.',
+        help_text='AI tools enabled for chat and voice. Managed via checkboxes in admin.',
     )
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -137,11 +143,32 @@ class CompanyAIConfig(models.Model):
 
     @classmethod
     def default_enabled_tools(cls):
-        return ['search_knowledge_base', 'create_ticket', 'lookup_order', 'lookup_booking']
+        return [choice.value for choice in cls.ToolChoice]
+
+    @classmethod
+    def allowed_tool_names(cls):
+        return {choice.value for choice in cls.ToolChoice}
+
+    @classmethod
+    def normalize_enabled_tools(cls, tools):
+        if not tools:
+            return cls.default_enabled_tools()
+
+        allowed = cls.allowed_tool_names()
+        normalized = []
+        seen = set()
+        for tool in tools:
+            name = str(tool).strip()
+            if name in allowed and name not in seen:
+                normalized.append(name)
+                seen.add(name)
+
+        if not normalized:
+            raise ValueError('At least one valid enabled tool is required.')
+        return normalized
 
     def save(self, *args, **kwargs):
-        if not self.enabled_tools:
-            self.enabled_tools = self.default_enabled_tools()
+        self.enabled_tools = self.normalize_enabled_tools(self.enabled_tools)
         super().save(*args, **kwargs)
 
 

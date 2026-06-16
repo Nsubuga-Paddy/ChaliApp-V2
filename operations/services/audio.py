@@ -1,4 +1,6 @@
 import logging
+import mimetypes
+from pathlib import Path
 
 from django.conf import settings
 from django.core.files.base import ContentFile
@@ -14,9 +16,13 @@ def get_openai_client() -> OpenAI:
 def transcribe_audio(audio_file, ai_config):
     client = get_openai_client()
     audio_file.seek(0)
+    filename = Path(getattr(audio_file, 'name', '') or 'voice_message.m4a').name
+    content_type = mimetypes.guess_type(filename)[0] or 'audio/mp4'
+    file_bytes = audio_file.read()
+    audio_file.seek(0)
     transcription = client.audio.transcriptions.create(
         model=ai_config.transcription_model,
-        file=audio_file,
+        file=(filename, file_bytes, content_type),
     )
     return transcription.text
 

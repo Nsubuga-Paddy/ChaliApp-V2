@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import logging
 import re
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 TARGET_CHUNK_TOKENS = 450
 CHUNK_OVERLAP_TOKENS = 80
+PDF_OCR_MIN_TEXT_CHARS = 40
+PDF_OCR_RENDER_SCALE = 2.0
 
 
 @dataclass
@@ -148,9 +151,77 @@ def extract_pdf_sections(path: str) -> list[ExtractedSection]:
     sections = []
     for index, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ''
+        normalized = normalize_text(text)
+        if len(normalized) < PDF_OCR_MIN_TEXT_CHARS:
+            ocr_text = extract_pdf_page_ocr(path, index)
+            if ocr_text:
+                text = ocr_text
         if text.strip():
             sections.append(ExtractedSection(text=text, page_number=index))
     return sections
+
+
+def extract_pdf_page_ocr(path: str, page_number: int) -> str:
+    if not getattr(settings, 'OPENAI_API_KEY', ''):
+        logger.warning('Skipping OCR for PDF page %s; OPENAI_API_KEY is not configured.', page_number)
+        return ''
+
+    try:
+        image_bytes = render_pdf_page_png(path, page_number)
+    except Exception:
+        logger.exception('Failed to render PDF page %s for OCR: %s', page_number, path)
+        return ''
+
+    try:
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        image_b64 = base64.b64encode(image_bytes).decode('ascii')
+        model = getattr(settings, 'OPENAI_OCR_MODEL', 'gpt-4o-mini')
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': (
+                        'You extract text from scanned knowledge-base documents. '
+                        'Return only text that is visible on the page. Preserve headings, list structure, '
+                        'tables as readable text, and the original language. Do not add explanations.'
+                    ),
+                },
+                {
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': f'Extract all readable text from page {page_number}.',
+                        },
+                        {
+                            'type': 'image_url',
+                            'image_url': {
+                                'url': f'data:image/png;base64,{image_b64}',
+                            },
+                        },
+                    ],
+                },
+            ],
+        )
+        return normalize_text(response.choices[0].message.content or '')
+    except Exception:
+        logger.exception('OpenAI OCR failed for PDF page %s: %s', page_number, path)
+        return ''
+
+
+def render_pdf_page_png(path: str, page_number: int) -> bytes:
+    try:
+        import fitz
+    except ImportError as exc:
+        raise RuntimeError('Scanned PDF OCR requires PyMuPDF. Install project requirements.') from exc
+
+    with fitz.open(path) as document:
+        page = document.load_page(page_number - 1)
+        matrix = fitz.Matrix(PDF_OCR_RENDER_SCALE, PDF_OCR_RENDER_SCALE)
+        pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+        return pixmap.tobytes('png')
 
 
 def extract_docx_sections(path: str) -> list[ExtractedSection]:

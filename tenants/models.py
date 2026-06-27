@@ -247,6 +247,18 @@ class KnowledgeSourceDocument(models.Model):
         related_name='uploaded_knowledge_sources',
     )
     is_published = models.BooleanField(default=True)
+    is_shareable = models.BooleanField(
+        default=False,
+        help_text=(
+            'When true, AI may attach this file as a downloadable document in customer chat. '
+            'Review all content carefully before enabling — customers will receive the file directly.'
+        ),
+    )
+    origin_url = models.URLField(
+        max_length=2000,
+        blank=True,
+        help_text='Automatically set for crawler-ingested files. Records the public URL from which this document was fetched.',
+    )
     indexed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -256,6 +268,14 @@ class KnowledgeSourceDocument(models.Model):
         indexes = [
             models.Index(fields=['company', 'status', 'is_published']),
             models.Index(fields=['company', 'content_hash']),
+            models.Index(fields=['company', 'is_shareable', 'is_published']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['company', 'origin_url'],
+                condition=models.Q(origin_url__gt=''),
+                name='unique_company_origin_url',
+            ),
         ]
 
     def __str__(self):

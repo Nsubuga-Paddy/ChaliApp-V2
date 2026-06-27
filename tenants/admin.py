@@ -151,14 +151,75 @@ class KnowledgeDocumentAdmin(admin.ModelAdmin):
 
 @admin.register(KnowledgeSourceDocument)
 class KnowledgeSourceDocumentAdmin(admin.ModelAdmin):
-    list_display = ('title', 'company', 'file_type', 'status', 'is_published', 'indexed_at')
-    list_filter = ('company', 'file_type', 'status', 'is_published')
-    search_fields = ('title', 'error_message')
-    readonly_fields = ('content_hash', 'status', 'error_message', 'indexed_at', 'created_at', 'updated_at')
-    actions = ('reindex_selected',)
+    list_display = (
+        'title',
+        'company',
+        'file_type',
+        'status',
+        'is_published',
+        'is_shareable',
+        'origin_source',
+        'indexed_at',
+    )
+    list_filter = ('company', 'file_type', 'status', 'is_published', 'is_shareable')
+    search_fields = ('title', 'origin_url', 'error_message')
+    readonly_fields = (
+        'content_hash',
+        'status',
+        'error_message',
+        'origin_url',
+        'indexed_at',
+        'created_at',
+        'updated_at',
+    )
+    fieldsets = (
+        (
+            None,
+            {
+                'fields': (
+                    'company',
+                    'title',
+                    'file',
+                    'file_type',
+                    'is_published',
+                ),
+            },
+        ),
+        (
+            'Sharing',
+            {
+                'description': (
+                    'Mark "Shareable in chat" only after reviewing the document content. '
+                    'Customers will receive this exact file as a downloadable attachment.'
+                ),
+                'fields': ('is_shareable',),
+            },
+        ),
+        (
+            'Status & provenance',
+            {
+                'classes': ('collapse',),
+                'fields': (
+                    'status',
+                    'error_message',
+                    'content_hash',
+                    'origin_url',
+                    'uploaded_by',
+                    'indexed_at',
+                    'created_at',
+                    'updated_at',
+                ),
+            },
+        ),
+    )
+    actions = ('reindex_selected', 'mark_shareable', 'mark_not_shareable')
+
+    @admin.display(description='Source')
+    def origin_source(self, obj):
+        return 'Crawled' if obj.origin_url else 'Uploaded'
 
     def save_model(self, request, obj, form, change):
-        if not obj.uploaded_by_id:
+        if not obj.uploaded_by_id and not obj.origin_url:
             obj.uploaded_by = request.user
         super().save_model(request, obj, form, change)
         index_source_document(obj)
@@ -178,6 +239,22 @@ class KnowledgeSourceDocumentAdmin(admin.ModelAdmin):
             request,
             f'Reindexed {indexed} source document(s); {failed} failed.',
         )
+
+    @admin.action(description='Mark selected documents as shareable in chat')
+    def mark_shareable(self, request, queryset):
+        updated = queryset.filter(
+            status=KnowledgeSourceDocument.Status.INDEXED,
+        ).update(is_shareable=True)
+        skipped = queryset.count() - updated
+        msg = f'Marked {updated} document(s) as shareable.'
+        if skipped:
+            msg += f' {skipped} skipped (only indexed documents can be shared).'
+        self.message_user(request, msg)
+
+    @admin.action(description='Remove shareable flag from selected documents')
+    def mark_not_shareable(self, request, queryset):
+        updated = queryset.update(is_shareable=False)
+        self.message_user(request, f'Removed shareable flag from {updated} document(s).')
 
 
 @admin.register(KnowledgeWebSource)

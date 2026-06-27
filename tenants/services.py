@@ -1,6 +1,8 @@
 import hashlib
 import math
+import mimetypes
 import re
+from pathlib import Path
 
 from django.core.cache import cache
 from django.db.models import Q
@@ -104,6 +106,7 @@ def search_knowledge_chunks(
                 'heading': chunk.heading,
                 'page_number': chunk.page_number,
                 'slide_number': chunk.slide_number,
+                'source_attachment': _build_source_attachment(chunk, source, source_type),
                 'metadata': {
                     **(chunk.metadata or {}),
                     'vector_score': round(vector, 4),
@@ -112,6 +115,38 @@ def search_knowledge_chunks(
             }
         )
     return results
+
+
+def _build_source_attachment(chunk, source, source_type):
+    """Return a shareable attachment dict when a KB hit comes from a shareable source document.
+
+    Only `file` (KnowledgeSourceDocument) sources that have is_shareable=True and is_published=True
+    are considered. All other source types (web, manual) never produce file attachments.
+    """
+    if source_type != 'file' or source is None:
+        return None
+    if not getattr(source, 'is_shareable', False):
+        return None
+    if not getattr(source, 'is_published', True):
+        return None
+    try:
+        file_name = Path(source.file.name).name
+        file_url = source.file.url
+        file_size = source.file.size
+    except Exception:
+        return None
+    mime_type = mimetypes.guess_type(file_name)[0] or 'application/octet-stream'
+    return {
+        'id': f'src_{source.id}',
+        'title': source.title,
+        'description': '',
+        'file_url': file_url,
+        'file_name': file_name,
+        'mime_type': mime_type,
+        'size_bytes': file_size,
+        'origin_url': getattr(source, 'origin_url', '') or '',
+        'page_number': chunk.page_number,
+    }
 
 
 def search_legacy_documents(company, query, limit=5, max_content_chars=None):

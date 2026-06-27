@@ -78,6 +78,8 @@ def index_source_document(source: KnowledgeSourceDocument) -> KnowledgeSourceDoc
                         metadata={
                             'source_title': source.title,
                             'file_type': source.file_type,
+                            'is_shareable': source.is_shareable,
+                            'origin_url': source.origin_url or '',
                         },
                     )
                     for index, chunk in enumerate(chunks)

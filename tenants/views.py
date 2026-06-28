@@ -2,7 +2,7 @@ from rest_framework import generics, permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .ingestion import index_legacy_document, index_source_document
+from .ingestion import index_legacy_document, schedule_index_source_document
 from .models import (
     Company,
     CompanyAIConfig,
@@ -141,16 +141,19 @@ class KnowledgeSourceDocumentViewSet(viewsets.ModelViewSet):
             company=self.request.company,
             uploaded_by=self.request.user,
         )
-        index_source_document(source)
+        schedule_index_source_document(source)
+        source.refresh_from_db(fields=['status', 'error_message', 'indexed_at'])
 
     def perform_update(self, serializer):
         source = serializer.save()
-        index_source_document(source)
+        schedule_index_source_document(source)
+        source.refresh_from_db(fields=['status', 'error_message', 'indexed_at'])
 
     @action(detail=True, methods=['post'])
     def reindex(self, request, pk=None):
         source = self.get_object()
-        index_source_document(source)
+        schedule_index_source_document(source)
+        source.refresh_from_db(fields=['status', 'error_message'])
         return Response(self.get_serializer(source).data)
 
     @action(detail=True, methods=['get'])

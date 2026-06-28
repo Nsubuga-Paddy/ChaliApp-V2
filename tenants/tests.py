@@ -151,7 +151,7 @@ class KnowledgeRetrievalTests(TestCase):
         self.assertEqual(results, [])
 
 
-@override_settings(OPENAI_API_KEY='')
+@override_settings(OPENAI_API_KEY='', CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True)
 class KnowledgeSourcePermissionTests(TestCase):
     def setUp(self):
         self.company_a = Company.objects.create(name='Company A', slug='company-a')

@@ -1,7 +1,26 @@
 from celery import shared_task
 
-from .models import KnowledgeWebSource
+from .ingestion import index_source_document
+from .models import KnowledgeSourceDocument, KnowledgeWebSource
 from .web_ingestion import index_web_source, refresh_due_web_sources
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={'max_retries': 2},
+)
+def index_knowledge_source_document(self, source_id: int) -> dict:
+    source = KnowledgeSourceDocument.objects.select_related('company').get(pk=source_id)
+    index_source_document(source)
+    source.refresh_from_db(fields=['status', 'error_message', 'indexed_at'])
+    return {
+        'source_id': source.id,
+        'status': source.status,
+        'error_message': source.error_message,
+        'indexed_at': source.indexed_at.isoformat() if source.indexed_at else None,
+    }
 
 
 @shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={'max_retries': 3})

@@ -93,6 +93,44 @@ def index_source_document(source: KnowledgeSourceDocument) -> KnowledgeSourceDoc
     return source
 
 
+def schedule_index_source_document(source: KnowledgeSourceDocument) -> None:
+    """Queue indexing on Celery after the DB transaction commits."""
+    KnowledgeSourceDocument.objects.filter(pk=source.pk).update(
+        status=KnowledgeSourceDocument.Status.PENDING,
+        error_message='',
+    )
+
+    source_id = source.pk
+
+    def _run_index() -> None:
+        from .tasks import index_knowledge_source_document
+
+        if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
+            index_knowledge_source_document(source_id)
+            return
+        try:
+            index_knowledge_source_document.delay(source_id)
+        except Exception:
+            logger.exception(
+                'Celery broker unavailable; indexing source %s synchronously',
+                source_id,
+            )
+            index_source_document(
+                KnowledgeSourceDocument.objects.get(pk=source_id),
+            )
+
+    if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
+        _run_index()
+        return
+
+    transaction.on_commit(_run_index)
+
+
+def _openai_client() -> OpenAI:
+    timeout = float(getattr(settings, 'OPENAI_HTTP_TIMEOUT_SECONDS', 120))
+    return OpenAI(api_key=settings.OPENAI_API_KEY, timeout=timeout)
+
+
 def index_legacy_document(document: KnowledgeDocument) -> None:
     sections = [
         ExtractedSection(
@@ -151,10 +189,12 @@ def extract_pdf_sections(path: str) -> list[ExtractedSection]:
 
     reader = PdfReader(path)
     sections = []
+    page_count = len(reader.pages)
     for index, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ''
         normalized = normalize_text(text)
         if len(normalized) < PDF_OCR_MIN_TEXT_CHARS:
+            logger.info('Running OCR for PDF page %s/%s: %s', index, page_count, path)
             ocr_text = extract_pdf_page_ocr(path, index)
             if ocr_text:
                 text = ocr_text
@@ -175,7 +215,7 @@ def extract_pdf_page_ocr(path: str, page_number: int) -> str:
         return ''
 
     try:
-        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        client = _openai_client()
         image_b64 = base64.b64encode(image_bytes).decode('ascii')
         model = getattr(settings, 'OPENAI_OCR_MODEL', 'gpt-4o-mini')
         response = client.chat.completions.create(
@@ -321,7 +361,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
     model = getattr(settings, 'OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
     try:
-        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        client = _openai_client()
         response = client.embeddings.create(model=model, input=texts)
         by_index = sorted(response.data, key=lambda item: item.index)
         return [list(item.embedding) for item in by_index]

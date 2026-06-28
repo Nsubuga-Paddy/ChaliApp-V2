@@ -1,7 +1,7 @@
-from django.contrib import admin
+from django.contrib import admin, messages
 
 from .forms import CompanyAIConfigAdminForm, CompanyAIConfigInlineFormSet
-from .ingestion import index_source_document
+from .ingestion import schedule_index_source_document
 from .models import (
     Company,
     CompanyAIConfig,
@@ -222,22 +222,24 @@ class KnowledgeSourceDocumentAdmin(admin.ModelAdmin):
         if not obj.uploaded_by_id and not obj.origin_url:
             obj.uploaded_by = request.user
         super().save_model(request, obj, form, change)
-        index_source_document(obj)
+        schedule_index_source_document(obj)
+        self.message_user(
+            request,
+            'Indexing queued in the background. Refresh this page in a minute to '
+            'check status (Processing → Indexed). Large scanned PDFs can take several minutes.',
+            messages.SUCCESS,
+        )
 
     @admin.action(description='Reindex selected knowledge source documents')
     def reindex_selected(self, request, queryset):
-        indexed = 0
-        failed = 0
+        queued = 0
         for source in queryset:
-            index_source_document(source)
-            source.refresh_from_db(fields=['status'])
-            if source.status == KnowledgeSourceDocument.Status.INDEXED:
-                indexed += 1
-            elif source.status == KnowledgeSourceDocument.Status.FAILED:
-                failed += 1
+            schedule_index_source_document(source)
+            queued += 1
         self.message_user(
             request,
-            f'Reindexed {indexed} source document(s); {failed} failed.',
+            f'Queued {queued} document(s) for background indexing.',
+            messages.SUCCESS,
         )
 
     @admin.action(description='Mark selected documents as shareable in chat')

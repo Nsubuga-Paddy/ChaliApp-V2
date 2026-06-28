@@ -52,10 +52,11 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_filters',
     'django_celery_beat',
-    # Chali apps (3-app architecture)
+    # Chali apps
     'accounts',
     'tenants',
     'operations',
+    'payments',
 ]
 
 MIDDLEWARE = [
@@ -179,6 +180,21 @@ CSRF_COOKIE_SECURE = env_bool('CSRF_COOKIE_SECURE', not DEBUG)
 SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '0' if DEBUG else '31536000'))
 SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', not DEBUG)
 SECURE_HSTS_PRELOAD = env_bool('SECURE_HSTS_PRELOAD', False)
+
+# ── Pegasus payment gateway ───────────────────────────────────────────────────
+PEGASUS_BASE_URL = os.getenv('PEGASUS_BASE_URL', 'https://sandbox.pegasusgateway.com')
+PEGASUS_USERNAME = os.getenv('PEGASUS_USERNAME', '')
+PEGASUS_PASSWORD = os.getenv('PEGASUS_PASSWORD', '')
+PEGASUS_VENDOR_CODE = os.getenv('PEGASUS_VENDOR_CODE', '')
+PEGASUS_TIMEOUT = int(os.getenv('PEGASUS_TIMEOUT', '30'))
+# Biller codes — override per environment
+PEGASUS_BILLER_YAKA = os.getenv('PEGASUS_BILLER_YAKA', 'YAKA')
+PEGASUS_BILLER_WATER = os.getenv('PEGASUS_BILLER_WATER', 'NWSC')
+PEGASUS_BILLER_AIRTIME_MTN = os.getenv('PEGASUS_BILLER_AIRTIME_MTN', 'MTNAIRTIME')
+PEGASUS_BILLER_AIRTIME_AIRTEL = os.getenv('PEGASUS_BILLER_AIRTIME_AIRTEL', 'AIRTELAIRTIME')
+PEGASUS_BILLER_TV = os.getenv('PEGASUS_BILLER_TV', 'DSTV')
+PEGASUS_BILLER_SCHOOL = os.getenv('PEGASUS_BILLER_SCHOOL', 'SCHOOLFEES')
+PEGASUS_BILLER_URA = os.getenv('PEGASUS_BILLER_URA', 'URA')
 
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', REDIS_URL)

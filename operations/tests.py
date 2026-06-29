@@ -4,10 +4,88 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
 from operations.models import Conversation
+from operations.services.text import (
+    _attachments_for_reply,
+    _collect_shareable_attachments,
+    _customer_requested_document,
+)
 from operations.services.voice import create_realtime_session
 from tenants.models import Company, CompanyAIConfig
 
 User = get_user_model()
+
+
+class ShareableDocumentAttachmentTests(TestCase):
+    def _tool_calls_meta(self):
+        return [
+            {
+                'name': 'search_knowledge_base',
+                'result': {
+                    'results': [
+                        {
+                            'confidence': 'high',
+                            'score': 0.82,
+                            'source_attachment': {
+                                'id': 'src_1',
+                                'title': 'Relevant Tariff Guide',
+                                'file_url': '/media/knowledge/tariff.pdf',
+                                'file_name': 'tariff.pdf',
+                            },
+                        },
+                        {
+                            'confidence': 'low',
+                            'score': 0.09,
+                            'source_attachment': {
+                                'id': 'src_2',
+                                'title': 'Unrelated Handbook',
+                                'file_url': '/media/knowledge/handbook.pdf',
+                                'file_name': 'handbook.pdf',
+                            },
+                        },
+                    ],
+                    'shareable_documents': [
+                        {
+                            'id': 'media_1',
+                            'title': 'Generic Brochure',
+                            'file_url': '/media/company/brochure.pdf',
+                            'file_name': 'brochure.pdf',
+                        },
+                    ],
+                },
+            },
+        ]
+
+    def test_customer_must_explicitly_request_document_attachment(self):
+        tool_calls_meta = self._tool_calls_meta()
+
+        self.assertEqual(
+            _attachments_for_reply('What are the current tariffs?', None, tool_calls_meta),
+            [],
+        )
+        self.assertEqual(
+            _attachments_for_reply('Please send the pdf document', None, tool_calls_meta),
+            [
+                {
+                    'type': 'document',
+                    'id': 'src_1',
+                    'title': 'Relevant Tariff Guide',
+                    'file_url': '/media/knowledge/tariff.pdf',
+                    'file_name': 'tariff.pdf',
+                },
+            ],
+        )
+
+    def test_only_relevant_indexed_source_documents_are_attachable(self):
+        attachments = _collect_shareable_attachments(self._tool_calls_meta())
+
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]['id'], 'src_1')
+        self.assertEqual(attachments[0]['title'], 'Relevant Tariff Guide')
+
+    def test_document_request_intent_requires_explicit_file_language(self):
+        self.assertFalse(_customer_requested_document('What are the current tariffs?'))
+        self.assertTrue(_customer_requested_document('Can you share the related document?'))
+        self.assertTrue(_customer_requested_document('Please send the PDF'))
 
 
 @override_settings(OPENAI_API_KEY='test-key')

@@ -85,6 +85,12 @@ class CompanyAdmin(admin.ModelAdmin):
     prepopulated_fields = {'slug': ('name',)}
     inlines = [CompanyAIConfigInline, CompanyMembershipInline, KnowledgeDocumentInline, KnowledgeWebSourceInline]
 
+    def get_inlines(self, request, obj):
+        inlines = super().get_inlines(request, obj)
+        if obj is None:
+            return [inline for inline in inlines if inline is not CompanyAIConfigInline]
+        return inlines
+
     def save_formset(self, request, form, formset, change):
         instances = formset.save(commit=False)
         for obj in formset.deleted_objects:

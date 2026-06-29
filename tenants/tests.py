@@ -1,10 +1,12 @@
 from django.contrib.auth import get_user_model
+from django.contrib.admin.sites import AdminSite
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from unittest.mock import Mock, patch
 
+from .admin import CompanyAIConfigInline, CompanyAdmin
 from .forms import CompanyAIConfigAdminForm
 from .ingestion import index_legacy_document
 from .models import Company, CompanyAIConfig, CompanyMembership, KnowledgeChunk, KnowledgeDocument, KnowledgeWebSource
@@ -108,6 +110,23 @@ class CompanyAIConfigAdminFormTests(TestCase):
             ['search_knowledge_base', 'invalid_tool', 'create_ticket']
         )
         self.assertEqual(normalized, ['search_knowledge_base', 'create_ticket'])
+
+
+class CompanyAdminInlineTests(TestCase):
+    def setUp(self):
+        self.admin = CompanyAdmin(Company, AdminSite())
+
+    def test_ai_config_inline_is_hidden_when_adding_company(self):
+        inlines = self.admin.get_inlines(request=None, obj=None)
+
+        self.assertNotIn(CompanyAIConfigInline, inlines)
+
+    def test_ai_config_inline_is_available_when_editing_company(self):
+        company = Company.objects.create(name='Company A', slug='company-a')
+
+        inlines = self.admin.get_inlines(request=None, obj=company)
+
+        self.assertIn(CompanyAIConfigInline, inlines)
 
 
 @override_settings(OPENAI_API_KEY='')

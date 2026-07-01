@@ -11,7 +11,7 @@ from .models import (
     KnowledgeSourceDocument,
     KnowledgeWebSource,
 )
-from .web_ingestion import index_web_source
+from .web_ingestion import schedule_index_web_source
 
 
 class CompanyMembershipInline(admin.TabularInline):
@@ -100,9 +100,7 @@ class CompanyAdmin(admin.ModelAdmin):
                 instance.created_by = request.user
             instance.save()
             if isinstance(instance, KnowledgeWebSource):
-                instance.schedule_next_crawl()
-                instance.save(update_fields=['next_crawl_at', 'updated_at'])
-                index_web_source(instance)
+                schedule_index_web_source(instance)
         formset.save_m2m()
 
 
@@ -302,27 +300,23 @@ class KnowledgeWebSourceAdmin(admin.ModelAdmin):
         if not obj.created_by_id:
             obj.created_by = request.user
         super().save_model(request, obj, form, change)
-        obj.schedule_next_crawl()
-        obj.save(update_fields=['next_crawl_at', 'updated_at'])
-        index_web_source(obj)
-
-    @admin.action(description='Reindex selected web sources now')
-    def reindex_selected(self, request, queryset):
-        indexed = 0
-        unchanged = 0
-        failed = 0
-        for source in queryset:
-            index_web_source(source)
-            source.refresh_from_db(fields=['status'])
-            if source.status == KnowledgeWebSource.Status.INDEXED:
-                indexed += 1
-            elif source.status == KnowledgeWebSource.Status.UNCHANGED:
-                unchanged += 1
-            elif source.status == KnowledgeWebSource.Status.FAILED:
-                failed += 1
+        schedule_index_web_source(obj)
         self.message_user(
             request,
-            f'Reindexed {indexed}; unchanged {unchanged}; failed {failed}.',
+            'Web source indexing queued in the background. Refresh this page later to check status.',
+            messages.SUCCESS,
+        )
+
+    @admin.action(description='Queue selected web sources for reindexing')
+    def reindex_selected(self, request, queryset):
+        queued = 0
+        for source in queryset:
+            schedule_index_web_source(source)
+            queued += 1
+        self.message_user(
+            request,
+            f'Queued {queued} web source(s) for background indexing.',
+            messages.SUCCESS,
         )
 
     @admin.action(description='Enable selected web sources')

@@ -11,7 +11,7 @@ from .forms import CompanyAIConfigAdminForm
 from .ingestion import index_legacy_document
 from .models import Company, CompanyAIConfig, CompanyMembership, KnowledgeChunk, KnowledgeDocument, KnowledgeWebSource
 from .services import search_knowledge_base
-from .web_ingestion import index_web_source, refresh_due_web_sources
+from .web_ingestion import WebSourceCrawler, index_web_source, is_pdf_url, refresh_due_web_sources
 
 User = get_user_model()
 
@@ -225,7 +225,7 @@ class KnowledgeSourcePermissionTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
-@override_settings(OPENAI_API_KEY='')
+@override_settings(OPENAI_API_KEY='', CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True)
 class KnowledgeWebSourceTests(TestCase):
     def setUp(self):
         self.company_a = Company.objects.create(name='Company A', slug='company-a')
@@ -352,3 +352,50 @@ class KnowledgeWebSourceTests(TestCase):
         self.assertEqual(result['processed'], 1)
         self.assertEqual(result['indexed'], 1)
         self.assertEqual(KnowledgeChunk.objects.filter(company=self.company_a, web_source__isnull=False).count(), 1)
+
+    def test_pdf_url_detection_handles_download_query_urls(self):
+        self.assertTrue(is_pdf_url('https://example.com/download?file=tariffs.pdf'))
+        self.assertTrue(is_pdf_url('https://example.com/uploads/tariffs.pdf?download=1'))
+
+    @patch('tenants.web_ingestion.WebSourceCrawler._load_robots')
+    @patch('tenants.web_ingestion.requests.Session.get')
+    def test_failed_web_source_records_crawl_diagnostics(self, mock_get, mock_robots):
+        robot = Mock()
+        robot.can_fetch.return_value = True
+        mock_robots.return_value = robot
+        mock_get.return_value = self._mock_response('<html><body><script>renderApp()</script></body></html>')
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='Empty JS Shell',
+            url='https://example.com/app',
+        )
+
+        index_web_source(source)
+
+        source.refresh_from_db()
+        self.assertEqual(source.status, KnowledgeWebSource.Status.FAILED)
+        self.assertIn('Crawl stats:', source.last_error)
+        self.assertIn('empty_html_pages=1', source.last_error)
+
+    @patch('tenants.web_ingestion.WebSourceCrawler._load_robots')
+    @patch('tenants.web_ingestion.requests.Session.get')
+    def test_pdf_content_type_url_is_discovered_without_pdf_extension(self, mock_get, mock_robots):
+        robot = Mock()
+        robot.can_fetch.return_value = True
+        mock_robots.return_value = robot
+        response = Mock()
+        response.text = '%PDF-1.4'
+        response.status_code = 200
+        response.headers = {'content-type': 'application/pdf'}
+        response.raise_for_status = Mock()
+        mock_get.return_value = response
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='Download',
+            url='https://example.com/download?id=123',
+        )
+
+        pages, pdf_urls = WebSourceCrawler(source).crawl()
+
+        self.assertEqual(pages, [])
+        self.assertEqual(pdf_urls, ['https://example.com/download?id=123'])

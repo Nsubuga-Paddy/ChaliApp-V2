@@ -25,7 +25,7 @@ from .serializers import (
     KnowledgeWebSourceSerializer,
     StaffCompanyMembershipSerializer,
 )
-from .web_ingestion import index_web_source
+from .web_ingestion import schedule_index_web_source
 
 
 class PublicCompanyListView(generics.ListAPIView):
@@ -183,20 +183,19 @@ class KnowledgeWebSourceViewSet(viewsets.ModelViewSet):
             company=self.request.company,
             created_by=self.request.user,
         )
-        source.schedule_next_crawl()
-        source.save(update_fields=['next_crawl_at', 'updated_at'])
-        index_web_source(source)
+        schedule_index_web_source(source)
+        source.refresh_from_db(fields=['status', 'last_error', 'next_crawl_at'])
 
     def perform_update(self, serializer):
         source = serializer.save()
-        source.schedule_next_crawl()
-        source.save(update_fields=['next_crawl_at', 'updated_at'])
-        index_web_source(source)
+        schedule_index_web_source(source)
+        source.refresh_from_db(fields=['status', 'last_error', 'next_crawl_at'])
 
     @action(detail=True, methods=['post'])
     def reindex(self, request, pk=None):
         source = self.get_object()
-        index_web_source(source)
+        schedule_index_web_source(source)
+        source.refresh_from_db(fields=['status', 'last_error', 'next_crawl_at'])
         return Response(self.get_serializer(source).data)
 
     @action(detail=True, methods=['get'])

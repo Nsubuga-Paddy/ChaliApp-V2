@@ -17,7 +17,7 @@ from django.core.files import File
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from .ingestion import ExtractedSection, build_chunks, embed_texts, index_source_document
+from .ingestion import ExtractedSection, build_chunks, embed_texts, schedule_index_source_document
 from .models import KnowledgeChunk, KnowledgeSourceDocument, KnowledgeWebSource
 
 logger = logging.getLogger(__name__)
@@ -105,9 +105,15 @@ def should_skip_url(url: str) -> bool:
 
 
 def is_pdf_url(url: str) -> bool:
-    """Heuristic: URL path ends with .pdf or another known document extension."""
-    path = urlparse(url).path.lower()
-    return any(path.endswith(ext) for ext in PDF_EXTENSIONS)
+    """Heuristic: URL path or query references a PDF document."""
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+    return any(ext in path or ext in query for ext in PDF_EXTENSIONS)
+
+
+def is_pdf_response(content_type: str) -> bool:
+    return 'pdf' in (content_type or '').lower()
 
 
 def hash_text(text: str) -> str:
@@ -130,6 +136,16 @@ class WebSourceCrawler:
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': self.user_agent})
         self.robot_parser = self._load_robots()
+        self.stats = {
+            'visited': 0,
+            'fetched': 0,
+            'html_pages_with_text': 0,
+            'empty_html_pages': 0,
+            'pdf_links': 0,
+            'robots_blocked': 0,
+            'external_links_skipped': 0,
+            'binary_links_skipped': 0,
+        }
 
     def crawl(self) -> tuple[list[FetchedPage], list[str]]:
         """Crawl the web source.
@@ -149,32 +165,49 @@ class WebSourceCrawler:
         seen_pdfs: set[str] = set()
         pages = []
 
+        def remember_pdf(pdf_url: str) -> None:
+            if pdf_url not in seen_pdfs and len(pdf_urls) < PDF_CRAWL_MAX_PER_SOURCE:
+                pdf_urls.append(pdf_url)
+                seen_pdfs.add(pdf_url)
+                self.stats['pdf_links'] = len(pdf_urls)
+
         while frontier and len(pages) < self.max_pages:
             url, depth = frontier.popleft()
             url = normalize_url(url, self.start_url)
             if not url or url in visited:
                 continue
             visited.add(url)
+            self.stats['visited'] += 1
 
             if not self._can_fetch(url):
                 logger.info('Robots.txt disallowed crawl for %s', url)
+                self.stats['robots_blocked'] += 1
                 continue
 
             # PDF links: collect for later ingestion, do not parse as HTML.
             if is_pdf_url(url) and same_domain(url, self.start_url):
-                if url not in seen_pdfs and len(pdf_urls) < PDF_CRAWL_MAX_PER_SOURCE:
-                    pdf_urls.append(url)
-                    seen_pdfs.add(url)
+                remember_pdf(url)
                 continue
 
-            if should_skip_url(url) or not same_domain(url, self.start_url):
+            if not same_domain(url, self.start_url):
+                self.stats['external_links_skipped'] += 1
+                continue
+            if should_skip_url(url):
+                self.stats['binary_links_skipped'] += 1
                 continue
             if depth > self.max_depth:
                 continue
 
             page = self._fetch_page(url)
+            self.stats['fetched'] += 1
+            if is_pdf_response(page.content_type):
+                remember_pdf(url)
+                continue
             if page.text:
                 pages.append(page)
+                self.stats['html_pages_with_text'] += 1
+            else:
+                self.stats['empty_html_pages'] += 1
 
             if depth >= self.max_depth:
                 continue
@@ -182,16 +215,29 @@ class WebSourceCrawler:
                 next_url = normalize_url(link, url)
                 if not next_url or next_url in visited:
                     continue
-                if not same_domain(next_url, self.start_url):
-                    continue
                 if is_pdf_url(next_url):
-                    if next_url not in seen_pdfs and len(pdf_urls) < PDF_CRAWL_MAX_PER_SOURCE:
-                        pdf_urls.append(next_url)
-                        seen_pdfs.add(next_url)
+                    remember_pdf(next_url)
+                elif not same_domain(next_url, self.start_url):
+                    self.stats['external_links_skipped'] += 1
                 elif not should_skip_url(next_url):
                     frontier.append((next_url, depth + 1))
+                else:
+                    self.stats['binary_links_skipped'] += 1
 
         return pages, pdf_urls
+
+    def no_indexable_content_message(self) -> str:
+        return (
+            'No indexable text or PDF documents were found at this URL. '
+            f"Crawl stats: visited={self.stats['visited']}, fetched={self.stats['fetched']}, "
+            f"html_pages_with_text={self.stats['html_pages_with_text']}, "
+            f"empty_html_pages={self.stats['empty_html_pages']}, pdf_links={self.stats['pdf_links']}, "
+            f"robots_blocked={self.stats['robots_blocked']}, "
+            f"external_links_skipped={self.stats['external_links_skipped']}, "
+            f"binary_links_skipped={self.stats['binary_links_skipped']}. "
+            'Possible causes: JavaScript-rendered content, login/cookie/Cloudflare gate, '
+            'robots.txt restrictions, PDF links on another domain, or download URLs that hide the PDF.'
+        )
 
     def fetch_pdf_bytes(self, url: str) -> bytes | None:
         """Download a PDF URL and return its raw bytes, or None if it should be skipped.
@@ -253,6 +299,16 @@ class WebSourceCrawler:
         response = self.session.get(url, timeout=self.timeout)
         response.raise_for_status()
         content_type = response.headers.get('content-type', '')
+        if is_pdf_response(content_type):
+            return FetchedPage(
+                url=url,
+                title=url,
+                text='',
+                headings=[],
+                links=[],
+                status_code=response.status_code,
+                content_type=content_type,
+            )
         text = response.text
         return extract_html_page(text, url, response.status_code, content_type)
 
@@ -385,8 +441,8 @@ def _ingest_crawled_pdf(
         except OSError:
             pass
 
-    # Index asynchronously-safe: index_source_document is synchronous but short.
-    index_source_document(source)
+    # Crawled PDFs may be scanned, so queue document indexing separately.
+    schedule_index_source_document(source)
     return source
 
 
@@ -462,7 +518,8 @@ def index_web_source(source: KnowledgeWebSource) -> KnowledgeWebSource:
                 )
             return source
 
-        pages, pdf_urls = WebSourceCrawler(source).crawl()
+        crawler = WebSourceCrawler(source)
+        pages, pdf_urls = crawler.crawl()
 
         # ----- HTML pages → knowledge chunks -----
         if pages:
@@ -536,7 +593,7 @@ def index_web_source(source: KnowledgeWebSource) -> KnowledgeWebSource:
                     ]
                 )
         elif not pdf_urls:
-            raise ValueError('No indexable text or PDF documents were found at this URL.')
+            raise ValueError(crawler.no_indexable_content_message())
         else:
             # No HTML text at all, but PDFs were discovered — mark as indexed.
             source.status = KnowledgeWebSource.Status.INDEXED
@@ -580,6 +637,37 @@ def index_web_source(source: KnowledgeWebSource) -> KnowledgeWebSource:
             ]
         )
     return source
+
+
+def schedule_index_web_source(source: KnowledgeWebSource) -> None:
+    """Queue web-source indexing on Celery after the DB transaction commits."""
+    source.status = KnowledgeWebSource.Status.PENDING
+    source.last_error = ''
+    source.schedule_next_crawl()
+    source.save(update_fields=['status', 'last_error', 'next_crawl_at', 'updated_at'])
+
+    source_id = source.pk
+
+    def _run_index() -> None:
+        from .tasks import index_knowledge_web_source
+
+        if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
+            index_knowledge_web_source(source_id)
+            return
+        try:
+            index_knowledge_web_source.delay(source_id)
+        except Exception:
+            logger.exception(
+                'Celery broker unavailable; indexing web source %s synchronously',
+                source_id,
+            )
+            index_web_source(KnowledgeWebSource.objects.get(pk=source_id))
+
+    if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
+        _run_index()
+        return
+
+    transaction.on_commit(_run_index)
 
 
 def refresh_due_web_sources(limit: int = 50) -> dict:

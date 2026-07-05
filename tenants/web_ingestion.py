@@ -5,7 +5,7 @@ import os
 import re
 import tempfile
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
@@ -30,6 +30,16 @@ PDF_CRAWL_MAX_BYTES = getattr(settings, 'KNOWLEDGE_PDF_CRAWL_MAX_BYTES', 25 * 10
 
 # Maximum number of PDFs ingested per web-source crawl run.
 PDF_CRAWL_MAX_PER_SOURCE = getattr(settings, 'KNOWLEDGE_PDF_CRAWL_MAX_PER_SOURCE', 10)
+DOCUMENT_LIBRARY_PDF_MAX_PER_SOURCE = getattr(
+    settings,
+    'KNOWLEDGE_DOCUMENT_LIBRARY_PDF_MAX_PER_SOURCE',
+    100,
+)
+DOCUMENT_LIBRARY_MAX_PAGES_CAP = getattr(
+    settings,
+    'KNOWLEDGE_DOCUMENT_LIBRARY_MAX_PAGES_CAP',
+    100,
+)
 
 # HTML-only extensions that should never be fetched as documents.
 SKIP_EXTENSIONS = {
@@ -51,6 +61,26 @@ SKIP_EXTENSIONS = {
 # Extensions that identify a URL as a fetchable document (not an HTML page).
 PDF_EXTENSIONS = {'.pdf'}
 DOCUMENT_EXTENSIONS = {'.pdf', '.docx', '.pptx', '.txt'}
+DOCUMENT_LINK_KEYWORDS = {
+    'download',
+    'downloads',
+    'resource',
+    'resources',
+    'document',
+    'documents',
+    'publication',
+    'publications',
+    'file',
+    'files',
+    'attachment',
+}
+PAGINATION_LINK_KEYWORDS = {
+    'next',
+    'older',
+    'previous',
+    'page',
+    'paged',
+}
 NOISE_SELECTORS = (
     'script',
     'style',
@@ -78,6 +108,7 @@ class FetchedPage:
     links: list[str]
     status_code: int
     content_type: str
+    link_labels: dict[str, str] = field(default_factory=dict)
 
 
 def normalize_url(url: str, base_url: str = '') -> str:
@@ -116,9 +147,30 @@ def is_pdf_response(content_type: str) -> bool:
     return 'pdf' in (content_type or '').lower()
 
 
+def response_has_pdf_filename(headers) -> bool:
+    disposition = (headers or {}).get('content-disposition', '').lower()
+    return '.pdf' in disposition
+
+
 def hash_text(text: str) -> str:
     normalized = re.sub(r'\s+', ' ', text or '').strip().lower()
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
+
+def link_fingerprint(url: str, label: str = '') -> str:
+    parsed = urlparse(url)
+    text = f'{parsed.path} {parsed.query} {label}'.lower()
+    return re.sub(r'[^a-z0-9]+', ' ', text)
+
+
+def is_document_candidate_link(url: str, label: str = '') -> bool:
+    fingerprint = link_fingerprint(url, label)
+    return any(keyword in fingerprint for keyword in DOCUMENT_LINK_KEYWORDS)
+
+
+def is_pagination_link(url: str, label: str = '') -> bool:
+    fingerprint = link_fingerprint(url, label)
+    return any(keyword in fingerprint for keyword in PAGINATION_LINK_KEYWORDS)
 
 
 class WebSourceCrawler:
@@ -128,14 +180,30 @@ class WebSourceCrawler:
         self.timeout = getattr(settings, 'KNOWLEDGE_WEB_TIMEOUT_SECONDS', 20)
         self.request_delay = getattr(settings, 'KNOWLEDGE_WEB_REQUEST_DELAY_SECONDS', 0.5)
         self.user_agent = getattr(settings, 'KNOWLEDGE_WEB_USER_AGENT', DEFAULT_USER_AGENT)
-        self.max_pages = min(source.max_pages or 1, getattr(settings, 'KNOWLEDGE_WEB_MAX_PAGES_CAP', 50))
+        self.is_document_library = (
+            source.crawl_mode == KnowledgeWebSource.CrawlMode.DOCUMENT_LIBRARY
+        )
+        page_cap = (
+            DOCUMENT_LIBRARY_MAX_PAGES_CAP
+            if self.is_document_library
+            else getattr(settings, 'KNOWLEDGE_WEB_MAX_PAGES_CAP', 50)
+        )
+        self.pdf_limit = (
+            DOCUMENT_LIBRARY_PDF_MAX_PER_SOURCE
+            if self.is_document_library
+            else PDF_CRAWL_MAX_PER_SOURCE
+        )
+        self.max_pages = min(source.max_pages or 1, page_cap)
         self.max_depth = min(source.crawl_depth or 0, getattr(settings, 'KNOWLEDGE_WEB_MAX_DEPTH_CAP', 2))
         if source.crawl_mode == KnowledgeWebSource.CrawlMode.SINGLE_PAGE:
             self.max_pages = 1
             self.max_depth = 0
+        if self.is_document_library:
+            self.max_depth = max(self.max_depth, 1)
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': self.user_agent})
         self.robot_parser = self._load_robots()
+        self.pdf_title_hints: dict[str, str] = {}
         self.stats = {
             'visited': 0,
             'fetched': 0,
@@ -165,10 +233,12 @@ class WebSourceCrawler:
         seen_pdfs: set[str] = set()
         pages = []
 
-        def remember_pdf(pdf_url: str) -> None:
-            if pdf_url not in seen_pdfs and len(pdf_urls) < PDF_CRAWL_MAX_PER_SOURCE:
+        def remember_pdf(pdf_url: str, title_hint: str = '') -> None:
+            if pdf_url not in seen_pdfs and len(pdf_urls) < self.pdf_limit:
                 pdf_urls.append(pdf_url)
                 seen_pdfs.add(pdf_url)
+                if title_hint:
+                    self.pdf_title_hints[pdf_url] = title_hint
                 self.stats['pdf_links'] = len(pdf_urls)
 
         while frontier and len(pages) < self.max_pages:
@@ -201,7 +271,7 @@ class WebSourceCrawler:
             page = self._fetch_page(url)
             self.stats['fetched'] += 1
             if is_pdf_response(page.content_type):
-                remember_pdf(url)
+                remember_pdf(url, self.pdf_title_hints.get(url, ''))
                 continue
             if page.text:
                 pages.append(page)
@@ -212,14 +282,21 @@ class WebSourceCrawler:
             if depth >= self.max_depth:
                 continue
             for link in page.links:
+                label = page.link_labels.get(link, '')
                 next_url = normalize_url(link, url)
                 if not next_url or next_url in visited:
                     continue
                 if is_pdf_url(next_url):
-                    remember_pdf(next_url)
+                    remember_pdf(next_url, label)
                 elif not same_domain(next_url, self.start_url):
                     self.stats['external_links_skipped'] += 1
-                elif not should_skip_url(next_url):
+                elif self.is_document_library and is_document_candidate_link(next_url, label):
+                    if label:
+                        self.pdf_title_hints[next_url] = label
+                    frontier.append((next_url, depth + 1))
+                elif self.is_document_library and is_pagination_link(next_url, label):
+                    frontier.append((next_url, depth + 1))
+                elif not self.is_document_library and not should_skip_url(next_url):
                     frontier.append((next_url, depth + 1))
                 else:
                     self.stats['binary_links_skipped'] += 1
@@ -273,7 +350,11 @@ class WebSourceCrawler:
         pdf_bytes = b''.join(chunks)
 
         # Validate magic bytes — real PDFs start with %PDF
-        if not pdf_bytes.startswith(b'%PDF') and 'pdf' not in content_type:
+        if (
+            not pdf_bytes.startswith(b'%PDF')
+            and 'pdf' not in content_type
+            and not response_has_pdf_filename(response.headers)
+        ):
             logger.info('URL does not appear to be a PDF (bad magic/content-type): %s', url)
             return None
 
@@ -299,7 +380,14 @@ class WebSourceCrawler:
         response = self.session.get(url, timeout=self.timeout)
         response.raise_for_status()
         content_type = response.headers.get('content-type', '')
-        if is_pdf_response(content_type):
+        response_content = getattr(response, 'content', b'')
+        if not isinstance(response_content, (bytes, bytearray)):
+            response_content = b''
+        if (
+            is_pdf_response(content_type)
+            or response_has_pdf_filename(response.headers)
+            or response_content.startswith(b'%PDF')
+        ):
             return FetchedPage(
                 url=url,
                 title=url,
@@ -307,7 +395,7 @@ class WebSourceCrawler:
                 headings=[],
                 links=[],
                 status_code=response.status_code,
-                content_type=content_type,
+                content_type='application/pdf',
             )
         text = response.text
         return extract_html_page(text, url, response.status_code, content_type)
@@ -344,11 +432,18 @@ def extract_html_page(html_text: str, url: str, status_code: int, content_type: 
         if value and len(value) > 2:
             parts.append(value)
     text = clean_text(' '.join(parts) or main.get_text(' '))
-    links = [
-        href
-        for href in (anchor.get('href') for anchor in soup.find_all('a'))
-        if href
-    ]
+    links = []
+    link_labels = {}
+    for anchor in soup.find_all('a'):
+        href = anchor.get('href')
+        if not href:
+            continue
+        label = clean_text(anchor.get_text(' '))
+        if not label or label.lower() in {'download', 'view', 'open', 'read more'}:
+            label = nearby_link_title(anchor) or label
+        links.append(href)
+        if label:
+            link_labels[href] = label
     return FetchedPage(
         url=url,
         title=title,
@@ -357,12 +452,27 @@ def extract_html_page(html_text: str, url: str, status_code: int, content_type: 
         links=links,
         status_code=status_code,
         content_type=content_type,
+        link_labels=link_labels,
     )
 
 
 def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text or '')
     return text.strip()
+
+
+def nearby_link_title(anchor) -> str:
+    """Find a useful catalogue title near a generic Download link."""
+    for parent in anchor.parents:
+        if getattr(parent, 'name', None) in {'body', 'html'}:
+            break
+        heading = parent.find(['h1', 'h2', 'h3', 'h4', 'h5'])
+        if heading:
+            text = clean_text(heading.get_text(' '))
+            if text:
+                return text
+    previous = anchor.find_previous(['h1', 'h2', 'h3', 'h4', 'h5'])
+    return clean_text(previous.get_text(' ')) if previous else ''
 
 
 def _infer_pdf_title(pdf_url: str, link_text: str = '') -> str:
@@ -449,6 +559,7 @@ def _ingest_crawled_pdf(
 def ingest_crawled_pdfs(
     web_source: KnowledgeWebSource,
     pdf_urls: list[str],
+    title_hints: dict[str, str] | None = None,
 ) -> dict:
     """Download and ingest all PDF URLs collected during a web-source crawl.
 
@@ -465,7 +576,12 @@ def ingest_crawled_pdfs(
             if pdf_bytes is None:
                 skipped += 1
                 continue
-            result = _ingest_crawled_pdf(web_source, pdf_url, pdf_bytes)
+            result = _ingest_crawled_pdf(
+                web_source,
+                pdf_url,
+                pdf_bytes,
+                title_hint=(title_hints or {}).get(pdf_url, ''),
+            )
             if result is not None:
                 indexed += 1
             else:
@@ -542,7 +658,7 @@ def index_web_source(source: KnowledgeWebSource) -> KnowledgeWebSource:
                 )
                 # Even when HTML is unchanged, still try to ingest any new PDFs.
                 if pdf_urls:
-                    ingest_crawled_pdfs(source, pdf_urls)
+                    ingest_crawled_pdfs(source, pdf_urls, crawler.pdf_title_hints)
                 return source
 
             sections = pages_to_sections(pages)
@@ -614,7 +730,7 @@ def index_web_source(source: KnowledgeWebSource) -> KnowledgeWebSource:
 
         # ----- PDFs discovered during HTML crawl -----
         if pdf_urls:
-            pdf_summary = ingest_crawled_pdfs(source, pdf_urls)
+            pdf_summary = ingest_crawled_pdfs(source, pdf_urls, crawler.pdf_title_hints)
             logger.info(
                 'PDF ingestion for web source %s: %s',
                 source.pk,

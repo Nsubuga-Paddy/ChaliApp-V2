@@ -268,7 +268,10 @@ class KnowledgeSourceDocument(models.Model):
         indexes = [
             models.Index(fields=['company', 'status', 'is_published']),
             models.Index(fields=['company', 'content_hash']),
-            models.Index(fields=['company', 'is_shareable', 'is_published']),
+            models.Index(
+                fields=['company', 'is_shareable', 'is_published'],
+                name='tenants_kno_company_364bda_idx',
+            ),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -286,6 +289,7 @@ class KnowledgeWebSource(models.Model):
     class CrawlMode(models.TextChoices):
         SINGLE_PAGE = 'single_page', 'Single page only'
         SAME_DOMAIN_LIMITED = 'same_domain_limited', 'Same-domain limited crawl'
+        DOCUMENT_LIBRARY = 'document_library', 'Document library'
 
     class RefreshInterval(models.TextChoices):
         MANUAL = 'manual', 'Manual only'

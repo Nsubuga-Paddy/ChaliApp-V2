@@ -9,7 +9,15 @@ from unittest.mock import Mock, patch
 from .admin import CompanyAIConfigInline, CompanyAdmin
 from .forms import CompanyAIConfigAdminForm
 from .ingestion import index_legacy_document
-from .models import Company, CompanyAIConfig, CompanyMembership, KnowledgeChunk, KnowledgeDocument, KnowledgeWebSource
+from .models import (
+    Company,
+    CompanyAIConfig,
+    CompanyMembership,
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeSourceDocument,
+    KnowledgeWebSource,
+)
 from .services import search_knowledge_base
 from .web_ingestion import WebSourceCrawler, index_web_source, is_pdf_url, refresh_due_web_sources
 
@@ -399,3 +407,89 @@ class KnowledgeWebSourceTests(TestCase):
 
         self.assertEqual(pages, [])
         self.assertEqual(pdf_urls, ['https://example.com/download?id=123'])
+
+    @patch('tenants.web_ingestion.WebSourceCrawler._load_robots')
+    @patch('tenants.web_ingestion.requests.Session.get')
+    def test_document_library_follows_download_links_and_keeps_titles(self, mock_get, mock_robots):
+        robot = Mock()
+        robot.can_fetch.return_value = True
+        mock_robots.return_value = robot
+        html_response = self._mock_response(
+            '''
+            <html><body>
+              <article>
+                <h3>Client Charter FY 2025-2026</h3>
+                <a href="/download?id=charter">Download</a>
+              </article>
+            </body></html>
+            '''
+        )
+        pdf_response = Mock()
+        pdf_response.text = '%PDF-1.4'
+        pdf_response.content = b'%PDF-1.4 document'
+        pdf_response.status_code = 200
+        pdf_response.headers = {'content-type': 'application/pdf'}
+        pdf_response.raise_for_status = Mock()
+        mock_get.side_effect = [html_response, pdf_response]
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='Resource Centre',
+            url='https://example.com/resource-centre/',
+            crawl_mode=KnowledgeWebSource.CrawlMode.DOCUMENT_LIBRARY,
+            max_pages=5,
+        )
+
+        pages, pdf_urls = WebSourceCrawler(source).crawl()
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pdf_urls, ['https://example.com/download?id=charter'])
+        crawler = WebSourceCrawler(source)
+        mock_get.side_effect = [html_response, pdf_response]
+        crawler.crawl()
+        self.assertEqual(
+            crawler.pdf_title_hints['https://example.com/download?id=charter'],
+            'Client Charter FY 2025-2026',
+        )
+
+    @patch('tenants.web_ingestion.schedule_index_source_document')
+    @patch('tenants.web_ingestion.WebSourceCrawler._load_robots')
+    @patch('tenants.web_ingestion.requests.Session.get')
+    def test_document_library_ingests_discovered_pdf_as_source_document(self, mock_get, mock_robots, mock_schedule):
+        robot = Mock()
+        robot.can_fetch.return_value = True
+        mock_robots.return_value = robot
+        html_response = self._mock_response(
+            '''
+            <html><body>
+              <article>
+                <h3>Public Service FAQ</h3>
+                <a href="/download?file=faq">Download</a>
+              </article>
+            </body></html>
+            '''
+        )
+        pdf_response = Mock()
+        pdf_response.text = '%PDF-1.4'
+        pdf_response.content = b'%PDF-1.4 document'
+        pdf_response.status_code = 200
+        pdf_response.headers = {'content-type': 'application/pdf'}
+        pdf_response.raise_for_status = Mock()
+        pdf_response.iter_content.return_value = [b'%PDF-1.4 document']
+        mock_get.side_effect = [html_response, pdf_response, pdf_response]
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='Resource Centre',
+            url='https://example.com/resource-centre/',
+            crawl_mode=KnowledgeWebSource.CrawlMode.DOCUMENT_LIBRARY,
+            max_pages=5,
+        )
+
+        index_web_source(source)
+
+        source.refresh_from_db()
+        document = KnowledgeSourceDocument.objects.get(company=self.company_a)
+        self.assertEqual(source.status, KnowledgeWebSource.Status.INDEXED)
+        self.assertEqual(document.title, 'Public Service FAQ')
+        self.assertEqual(document.origin_url, 'https://example.com/download?file=faq')
+        self.assertFalse(document.is_shareable)
+        mock_schedule.assert_called_once_with(document)

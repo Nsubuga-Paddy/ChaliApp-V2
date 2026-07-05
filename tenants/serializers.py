@@ -300,6 +300,11 @@ class KnowledgeWebSourceSerializer(serializers.ModelSerializer):
         if crawl_mode == KnowledgeWebSource.CrawlMode.SINGLE_PAGE:
             attrs['crawl_depth'] = 0
             attrs['max_pages'] = 1
+        elif crawl_mode == KnowledgeWebSource.CrawlMode.DOCUMENT_LIBRARY:
+            if crawl_depth > 2:
+                raise serializers.ValidationError({'crawl_depth': 'Maximum document library crawl depth is 2.'})
+            if max_pages > 100:
+                raise serializers.ValidationError({'max_pages': 'Maximum document library pages per crawl is 100.'})
         elif crawl_depth > 2:
             raise serializers.ValidationError({'crawl_depth': 'Maximum crawl depth is 2 for production safety.'})
         elif max_pages > 50:

@@ -830,7 +830,20 @@ def schedule_index_web_source(source: KnowledgeWebSource) -> None:
     source.schedule_next_crawl()
     source.save(update_fields=['status', 'last_error', 'next_crawl_at', 'updated_at'])
 
-    crawl_web_source_task.delay(source.id)
+    try:
+        crawl_web_source_task.delay(source.id)
+    except Exception as exc:
+        # If the Celery broker (Redis) is unavailable or not yet fully
+        # initialized, don't crash the admin request. Running the crawl
+        # synchronously here would block the HTTP request again, which is
+        # the exact problem we're avoiding — so we just log and let the
+        # user retry once the broker is back up.
+        logger.warning(
+            'Celery broker unavailable (%s); skipping async crawl for web source %s. '
+            'Please retry once the broker is available.',
+            exc,
+            source.id,
+        )
 
 
 def refresh_due_web_sources(limit: int = 50) -> dict:

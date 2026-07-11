@@ -3,6 +3,7 @@ import logging
 import mimetypes
 import os
 import re
+import ssl
 import tempfile
 from collections import deque
 from dataclasses import dataclass, field
@@ -328,7 +329,15 @@ class WebSourceCrawler:
         try:
             response = self.session.get(url, timeout=self.timeout, stream=True)
             response.raise_for_status()
-        except Exception:
+        except (ssl.SSLError, requests.exceptions.SSLError) as exc:
+            logger.warning('SSL error fetching PDF %s: %s — retrying with verify=False', url, exc)
+            try:
+                response = self.session.get(url, timeout=self.timeout, stream=True, verify=False)
+                response.raise_for_status()
+            except Exception:
+                logger.exception('PDF fetch failed after SSL fallback: %s', url)
+                return None
+        except requests.exceptions.RequestException:
             logger.exception('Failed to fetch PDF: %s', url)
             return None
 
@@ -377,8 +386,20 @@ class WebSourceCrawler:
             return True
 
     def _fetch_page(self, url: str) -> FetchedPage:
-        response = self.session.get(url, timeout=self.timeout)
-        response.raise_for_status()
+        try:
+            response = self.session.get(url, timeout=self.timeout)
+            response.raise_for_status()
+        except (ssl.SSLError, requests.exceptions.SSLError) as exc:
+            logger.warning('SSL error fetching page %s: %s — retrying with verify=False', url, exc)
+            try:
+                response = self.session.get(url, timeout=self.timeout, verify=False)
+                response.raise_for_status()
+            except Exception:
+                logger.exception('Page fetch failed after SSL fallback: %s', url)
+                raise
+        except requests.exceptions.RequestException:
+            logger.exception('Failed to fetch page: %s', url)
+            raise
         content_type = response.headers.get('content-type', '')
         response_content = getattr(response, 'content', b'')
         if not isinstance(response_content, (bytes, bytearray)):

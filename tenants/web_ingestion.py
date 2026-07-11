@@ -14,6 +14,7 @@ from urllib.robotparser import RobotFileParser
 
 import requests
 from bs4 import BeautifulSoup
+from celery import shared_task
 from django.conf import settings
 from django.core.files import File
 from django.db import IntegrityError, transaction
@@ -821,34 +822,15 @@ def index_web_source(source: KnowledgeWebSource) -> KnowledgeWebSource:
 
 
 def schedule_index_web_source(source: KnowledgeWebSource) -> None:
-    """Queue web-source indexing on Celery after the DB transaction commits."""
+    """Queue web-source indexing on Celery. Returns immediately; the crawl runs
+    asynchronously in a background worker so slow sites cannot block the
+    HTTP request or exceed the web worker's timeout."""
     source.status = KnowledgeWebSource.Status.PENDING
     source.last_error = ''
     source.schedule_next_crawl()
     source.save(update_fields=['status', 'last_error', 'next_crawl_at', 'updated_at'])
 
-    source_id = source.pk
-
-    def _run_index() -> None:
-        from .tasks import index_knowledge_web_source
-
-        if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
-            index_knowledge_web_source(source_id)
-            return
-        try:
-            index_knowledge_web_source.delay(source_id)
-        except Exception:
-            logger.exception(
-                'Celery broker unavailable; indexing web source %s synchronously',
-                source_id,
-            )
-            index_web_source(KnowledgeWebSource.objects.get(pk=source_id))
-
-    if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
-        _run_index()
-        return
-
-    transaction.on_commit(_run_index)
+    crawl_web_source_task.delay(source.id)
 
 
 def refresh_due_web_sources(limit: int = 50) -> dict:
@@ -880,3 +862,16 @@ def refresh_due_web_sources(limit: int = 50) -> dict:
         'unchanged': unchanged,
         'failed': failed,
     }
+
+
+@shared_task(bind=True, max_retries=3)
+def crawl_web_source_task(self, source_id: int):
+    """Async task to crawl and index a web source."""
+    try:
+        source = KnowledgeWebSource.objects.get(pk=source_id)
+        index_web_source(source)
+    except KnowledgeWebSource.DoesNotExist:
+        logger.warning("Web source %s not found", source_id)
+    except Exception as exc:
+        logger.exception("Crawl task failed for source %s", source_id)
+        raise

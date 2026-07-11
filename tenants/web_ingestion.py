@@ -3,6 +3,7 @@ import logging
 import mimetypes
 import os
 import re
+import socket
 import ssl
 import tempfile
 from collections import deque
@@ -326,17 +327,33 @@ class WebSourceCrawler:
         if not self._can_fetch(url):
             logger.info('Robots.txt disallowed PDF fetch for %s', url)
             return None
+        request_timeout = (10, self.timeout)
         try:
-            response = self.session.get(url, timeout=self.timeout, stream=True)
+            response = self.session.get(url, timeout=request_timeout, stream=True)
             response.raise_for_status()
         except (ssl.SSLError, requests.exceptions.SSLError) as exc:
             logger.warning('SSL error fetching PDF %s: %s — retrying with verify=False', url, exc)
             try:
-                response = self.session.get(url, timeout=self.timeout, stream=True, verify=False)
+                response = self.session.get(url, timeout=request_timeout, stream=True, verify=False)
                 response.raise_for_status()
+            except (
+                socket.timeout,
+                ssl.SSLError,
+                requests.exceptions.SSLError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+            ) as retry_exc:
+                logger.warning('PDF fetch failed after SSL fallback (skipping): %s — %s', url, retry_exc)
+                return None
             except Exception:
                 logger.exception('PDF fetch failed after SSL fallback: %s', url)
                 return None
+        except (socket.timeout, requests.exceptions.Timeout) as exc:
+            logger.warning('Timeout fetching PDF %s: %s — skipping', url, exc)
+            return None
+        except requests.exceptions.ConnectionError as exc:
+            logger.warning('Connection error fetching PDF %s: %s — skipping', url, exc)
+            return None
         except requests.exceptions.RequestException:
             logger.exception('Failed to fetch PDF: %s', url)
             return None
@@ -385,21 +402,48 @@ class WebSourceCrawler:
         except Exception:
             return True
 
+    def _empty_page(self, url: str, status_code: int = 0) -> FetchedPage:
+        return FetchedPage(
+            url=url,
+            title=url,
+            text='',
+            headings=[],
+            links=[],
+            status_code=status_code,
+            content_type='',
+        )
+
     def _fetch_page(self, url: str) -> FetchedPage:
+        request_timeout = (10, self.timeout)
         try:
-            response = self.session.get(url, timeout=self.timeout)
+            response = self.session.get(url, timeout=request_timeout)
             response.raise_for_status()
         except (ssl.SSLError, requests.exceptions.SSLError) as exc:
             logger.warning('SSL error fetching page %s: %s — retrying with verify=False', url, exc)
             try:
-                response = self.session.get(url, timeout=self.timeout, verify=False)
+                response = self.session.get(url, timeout=request_timeout, verify=False)
                 response.raise_for_status()
+            except (
+                socket.timeout,
+                ssl.SSLError,
+                requests.exceptions.SSLError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+            ) as retry_exc:
+                logger.warning('Page fetch failed after SSL fallback (skipping): %s — %s', url, retry_exc)
+                return self._empty_page(url)
             except Exception:
                 logger.exception('Page fetch failed after SSL fallback: %s', url)
-                raise
-        except requests.exceptions.RequestException:
-            logger.exception('Failed to fetch page: %s', url)
-            raise
+                return self._empty_page(url)
+        except (socket.timeout, requests.exceptions.Timeout) as exc:
+            logger.warning('Timeout fetching page %s: %s — skipping', url, exc)
+            return self._empty_page(url)
+        except requests.exceptions.ConnectionError as exc:
+            logger.warning('Connection error fetching page %s: %s — skipping', url, exc)
+            return self._empty_page(url)
+        except requests.exceptions.RequestException as exc:
+            logger.warning('Failed to fetch page %s: %s — skipping', url, exc)
+            return self._empty_page(url)
         content_type = response.headers.get('content-type', '')
         response_content = getattr(response, 'content', b'')
         if not isinstance(response_content, (bytes, bytearray)):

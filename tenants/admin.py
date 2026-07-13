@@ -324,11 +324,14 @@ class KnowledgeWebSourceAdmin(admin.ModelAdmin):
         updated = 0
         for source in queryset:
             source.is_published = True
-            source.status = KnowledgeWebSource.Status.PENDING
-            source.schedule_next_crawl()
-            source.save(update_fields=['is_published', 'status', 'next_crawl_at', 'updated_at'])
+            source.save(update_fields=['is_published', 'updated_at'])
+            schedule_index_web_source(source)
             updated += 1
-        self.message_user(request, f'Enabled {updated} web source(s).')
+        self.message_user(
+            request,
+            f'Enabled and queued {updated} web source(s) for background indexing.',
+            messages.SUCCESS,
+        )
 
     @admin.action(description='Disable selected web sources')
     def disable_selected(self, request, queryset):

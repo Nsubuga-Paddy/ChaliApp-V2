@@ -54,6 +54,8 @@ KNOWLEDGE_WEB_USER_AGENT = os.getenv(
     'KNOWLEDGE_WEB_USER_AGENT',
     'ChaliKnowledgeCrawler/1.0 (+company-approved-knowledge-refresh)',
 )
+KNOWLEDGE_WEB_PENDING_STALE_MINUTES = int(os.getenv('KNOWLEDGE_WEB_PENDING_STALE_MINUTES', '10'))
+KNOWLEDGE_WEB_CRAWLING_STALE_MINUTES = int(os.getenv('KNOWLEDGE_WEB_CRAWLING_STALE_MINUTES', '45'))
 
 INSTALLED_APPS = [
     'django.contrib.admin',

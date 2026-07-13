@@ -5,6 +5,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from unittest.mock import Mock, patch
+from datetime import timedelta
 
 from .admin import CompanyAIConfigInline, CompanyAdmin
 from .forms import CompanyAIConfigAdminForm
@@ -19,7 +20,13 @@ from .models import (
     KnowledgeWebSource,
 )
 from .services import search_knowledge_base
-from .web_ingestion import WebSourceCrawler, index_web_source, is_pdf_url, refresh_due_web_sources
+from .web_ingestion import (
+    WebSourceCrawler,
+    index_web_source,
+    is_pdf_url,
+    refresh_due_web_sources,
+    schedule_index_web_source,
+)
 
 User = get_user_model()
 
@@ -493,3 +500,67 @@ class KnowledgeWebSourceTests(TestCase):
         self.assertEqual(document.origin_url, 'https://example.com/download?file=faq')
         self.assertFalse(document.is_shareable)
         mock_schedule.assert_called_once_with(document)
+
+    def test_schedule_index_marks_source_due_immediately(self):
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='Rates',
+            url='https://example.com/rates',
+            refresh_interval=KnowledgeWebSource.RefreshInterval.DAILY,
+        )
+        future = timezone.now() + timedelta(days=2)
+        KnowledgeWebSource.objects.filter(pk=source.pk).update(next_crawl_at=future)
+
+        with patch('tenants.tasks.index_knowledge_web_source') as mock_task:
+            schedule_index_web_source(source)
+
+        source.refresh_from_db()
+        self.assertEqual(source.status, KnowledgeWebSource.Status.PENDING)
+        self.assertLessEqual(source.next_crawl_at, timezone.now() + timedelta(seconds=5))
+        mock_task.assert_called_once_with(source.id)
+
+    @patch('tenants.web_ingestion.WebSourceCrawler._load_robots')
+    @patch('tenants.web_ingestion.requests.Session.get')
+    def test_stuck_pending_sources_are_recovered_by_refresh(self, mock_get, mock_robots):
+        robot = Mock()
+        robot.can_fetch.return_value = True
+        mock_robots.return_value = robot
+        mock_get.return_value = self._mock_response(
+            '<html><body><main><h1>About</h1><p>Company overview text for indexing.</p></main></body></html>'
+        )
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='About',
+            url='https://example.com/about',
+            status=KnowledgeWebSource.Status.PENDING,
+            next_crawl_at=timezone.now() + timedelta(days=1),
+            refresh_interval=KnowledgeWebSource.RefreshInterval.DAILY,
+        )
+        KnowledgeWebSource.objects.filter(pk=source.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=20),
+        )
+
+        result = refresh_due_web_sources()
+
+        source.refresh_from_db()
+        self.assertEqual(result['processed'], 1)
+        self.assertGreaterEqual(result['recovered_pending'], 1)
+        self.assertEqual(source.status, KnowledgeWebSource.Status.INDEXED)
+
+    def test_schedule_marks_failed_when_celery_broker_unavailable(self):
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='Broker Down',
+            url='https://example.com/broker-down',
+        )
+
+        with override_settings(CELERY_TASK_ALWAYS_EAGER=False):
+            with patch('tenants.tasks.index_knowledge_web_source') as mock_task:
+                mock_task.delay.side_effect = ConnectionError('redis down')
+                with self.captureOnCommitCallbacks(execute=True):
+                    schedule_index_web_source(source)
+
+        source.refresh_from_db()
+        self.assertEqual(source.status, KnowledgeWebSource.Status.FAILED)
+        self.assertIn('Celery broker unavailable', source.last_error)
+        self.assertLessEqual(source.next_crawl_at, timezone.now() + timedelta(seconds=5))

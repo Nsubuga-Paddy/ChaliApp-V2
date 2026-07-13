@@ -8,16 +8,17 @@ import ssl
 import tempfile
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 
 import requests
 from bs4 import BeautifulSoup
-from celery import shared_task
 from django.conf import settings
 from django.core.files import File
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from .ingestion import ExtractedSection, build_chunks, embed_texts, schedule_index_source_document
@@ -822,45 +823,97 @@ def index_web_source(source: KnowledgeWebSource) -> KnowledgeWebSource:
 
 
 def schedule_index_web_source(source: KnowledgeWebSource) -> None:
-    """Queue web-source indexing on Celery. Returns immediately; the crawl runs
-    asynchronously in a background worker so slow sites cannot block the
-    HTTP request or exceed the web worker's timeout."""
+    """Queue web-source indexing on Celery after the DB transaction commits.
+
+    Reindex/enable always mark the source due immediately (`next_crawl_at=now`).
+    The daily/hourly window is only advanced after a crawl finishes. Broker
+    failures mark the source Failed with a retryable next_crawl_at so beat can
+    recover instead of leaving Pending forever.
+    """
+    now = timezone.now()
     source.status = KnowledgeWebSource.Status.PENDING
     source.last_error = ''
-    source.schedule_next_crawl()
+    source.next_crawl_at = now
     source.save(update_fields=['status', 'last_error', 'next_crawl_at', 'updated_at'])
 
-    try:
-        crawl_web_source_task.delay(source.id)
-    except Exception as exc:
-        # If the Celery broker (Redis) is unavailable or not yet fully
-        # initialized, don't crash the admin request. Running the crawl
-        # synchronously here would block the HTTP request again, which is
-        # the exact problem we're avoiding — so we just log and let the
-        # user retry once the broker is back up.
-        logger.warning(
-            'Celery broker unavailable (%s); skipping async crawl for web source %s. '
-            'Please retry once the broker is available.',
-            exc,
-            source.id,
+    source_id = source.pk
+
+    def _enqueue() -> None:
+        from .tasks import index_knowledge_web_source
+
+        if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
+            index_knowledge_web_source(source_id)
+            return
+
+        try:
+            index_knowledge_web_source.delay(source_id)
+        except Exception as exc:
+            logger.exception(
+                'Celery broker unavailable while queueing web source %s',
+                source_id,
+            )
+            KnowledgeWebSource.objects.filter(pk=source_id).update(
+                status=KnowledgeWebSource.Status.FAILED,
+                last_error=f'Celery broker unavailable: {exc}',
+                next_crawl_at=timezone.now(),
+                updated_at=timezone.now(),
+            )
+
+    if getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False):
+        _enqueue()
+        return
+
+    transaction.on_commit(_enqueue)
+
+
+def _stale_web_source_queryset(now=None, limit: int = 50):
+    """Published sources that are due, stuck Pending, or stuck Crawling."""
+    now = now or timezone.now()
+    pending_stale = timedelta(
+        minutes=int(getattr(settings, 'KNOWLEDGE_WEB_PENDING_STALE_MINUTES', 10))
+    )
+    crawling_stale = timedelta(
+        minutes=int(getattr(settings, 'KNOWLEDGE_WEB_CRAWLING_STALE_MINUTES', 45))
+    )
+
+    due_q = Q(next_crawl_at__lte=now) | Q(next_crawl_at__isnull=True)
+    stuck_pending_q = Q(
+        status=KnowledgeWebSource.Status.PENDING,
+        updated_at__lte=now - pending_stale,
+    )
+    stuck_crawling_q = Q(
+        status=KnowledgeWebSource.Status.CRAWLING,
+        updated_at__lte=now - crawling_stale,
+    )
+
+    return (
+        KnowledgeWebSource.objects.filter(is_published=True)
+        .filter(due_q | stuck_pending_q | stuck_crawling_q)
+        .exclude(
+            status=KnowledgeWebSource.Status.CRAWLING,
+            updated_at__gt=now - crawling_stale,
         )
+        .select_related('company')
+        .order_by('next_crawl_at', 'updated_at')[:limit]
+    )
 
 
 def refresh_due_web_sources(limit: int = 50) -> dict:
     now = timezone.now()
-    due_sources = list(
-        KnowledgeWebSource.objects.filter(
-            is_published=True,
-            next_crawl_at__lte=now,
-        )
-        .exclude(status=KnowledgeWebSource.Status.CRAWLING)
-        .select_related('company')
-        .order_by('next_crawl_at')[:limit]
-    )
+    due_sources = list(_stale_web_source_queryset(now=now, limit=limit))
     indexed = 0
     failed = 0
     unchanged = 0
+    recovered_pending = 0
+    recovered_crawling = 0
+
     for source in due_sources:
+        prior_status = source.status
+        if prior_status == KnowledgeWebSource.Status.PENDING:
+            recovered_pending += 1
+        elif prior_status == KnowledgeWebSource.Status.CRAWLING:
+            recovered_crawling += 1
+
         index_web_source(source)
         source.refresh_from_db(fields=['status'])
         if source.status == KnowledgeWebSource.Status.INDEXED:
@@ -869,22 +922,12 @@ def refresh_due_web_sources(limit: int = 50) -> dict:
             unchanged += 1
         elif source.status == KnowledgeWebSource.Status.FAILED:
             failed += 1
+
     return {
         'processed': len(due_sources),
         'indexed': indexed,
         'unchanged': unchanged,
         'failed': failed,
+        'recovered_pending': recovered_pending,
+        'recovered_crawling': recovered_crawling,
     }
-
-
-@shared_task(bind=True, max_retries=3)
-def crawl_web_source_task(self, source_id: int):
-    """Async task to crawl and index a web source."""
-    try:
-        source = KnowledgeWebSource.objects.get(pk=source_id)
-        index_web_source(source)
-    except KnowledgeWebSource.DoesNotExist:
-        logger.warning("Web source %s not found", source_id)
-    except Exception as exc:
-        logger.exception("Crawl task failed for source %s", source_id)
-        raise

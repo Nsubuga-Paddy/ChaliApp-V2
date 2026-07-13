@@ -4,10 +4,14 @@ from tenants.serializers import absolute_media_url
 
 from .models import (
     Booking,
+    Branch,
     CallSession,
+    CatalogImportJob,
     CompanyMedia,
     Conversation,
     FollowUp,
+    MenuCategory,
+    MenuItem,
     Message,
     Order,
     Ticket,
@@ -319,3 +323,58 @@ class CompanyMediaSerializer(serializers.ModelSerializer):
 
     def get_file(self, obj):
         return absolute_media_url(self, obj.file)
+
+
+class BranchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Branch
+        fields = ('id', 'name', 'address', 'phone', 'opening_hours', 'is_active')
+
+
+class MenuCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MenuCategory
+        fields = ('id', 'name', 'sort_order')
+
+
+class MenuItemSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    branch_name = serializers.CharField(source='branch.name', read_only=True)
+    image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MenuItem
+        fields = (
+            'id',
+            'name',
+            'description',
+            'category',
+            'category_name',
+            'branch',
+            'branch_name',
+            'price',
+            'currency',
+            'image',
+            'is_available',
+            'is_featured',
+        )
+
+    def get_image(self, obj):
+        return absolute_media_url(self, obj.image)
+
+
+class CatalogImportJobSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CatalogImportJob
+        fields = (
+            'id',
+            'company',
+            'source_url',
+            'status',
+            'render_mode',
+            'items_found',
+            'log',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('status', 'items_found', 'log', 'created_at', 'updated_at')

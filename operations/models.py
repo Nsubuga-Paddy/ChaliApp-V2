@@ -10,6 +10,14 @@ def company_media_upload_path(instance, filename):
     return f'companies/{instance.company_id}/media/{filename}'
 
 
+def menu_item_image_upload_path(instance, filename):
+    return f'companies/{instance.company_id}/menu_items/{filename}'
+
+
+def catalog_import_screenshot_upload_path(instance, filename):
+    return f'companies/{instance.company_id}/catalog_imports/{filename}'
+
+
 class CompanyMedia(models.Model):
     """Company-scoped media library for AI responses and customer sharing."""
 
@@ -39,6 +47,158 @@ class CompanyMedia(models.Model):
 
     def __str__(self):
         return f'{self.company.name}: {self.title}'
+
+
+class Branch(models.Model):
+    """A company location that can fulfill orders or bookings."""
+
+    company = models.ForeignKey(
+        'tenants.Company',
+        on_delete=models.CASCADE,
+        related_name='branches',
+    )
+    name = models.CharField(max_length=200)
+    address = models.CharField(max_length=300, blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    opening_hours = models.JSONField(default=dict, blank=True)
+    is_active = models.BooleanField(default=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['company__name', 'name']
+        constraints = [
+            models.UniqueConstraint(fields=['company', 'name'], name='ops_branch_company_name_uniq'),
+        ]
+        indexes = [
+            models.Index(fields=['company', 'is_active']),
+        ]
+
+    def __str__(self):
+        return f'{self.company.name}: {self.name}'
+
+
+class MenuCategory(models.Model):
+    company = models.ForeignKey(
+        'tenants.Company',
+        on_delete=models.CASCADE,
+        related_name='menu_categories',
+    )
+    name = models.CharField(max_length=120)
+    sort_order = models.PositiveIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['company__name', 'sort_order', 'name']
+        verbose_name_plural = 'menu categories'
+        constraints = [
+            models.UniqueConstraint(fields=['company', 'name'], name='ops_menu_cat_company_name_uniq'),
+        ]
+        indexes = [
+            models.Index(fields=['company', 'sort_order']),
+        ]
+
+    def __str__(self):
+        return f'{self.company.name}: {self.name}'
+
+
+class MenuItem(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        PUBLISHED = 'published', 'Published'
+        ARCHIVED = 'archived', 'Archived'
+
+    company = models.ForeignKey(
+        'tenants.Company',
+        on_delete=models.CASCADE,
+        related_name='menu_items',
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='menu_items',
+        help_text='Leave empty when the item is available at all branches.',
+    )
+    category = models.ForeignKey(
+        MenuCategory,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='items',
+    )
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=3, default='UGX')
+    image = models.ImageField(upload_to=menu_item_image_upload_path, null=True, blank=True)
+    source_image_url = models.URLField(blank=True)
+    is_available = models.BooleanField(default=True)
+    is_featured = models.BooleanField(default=False)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    source_url = models.URLField(blank=True)
+    extraction_confidence = models.FloatField(null=True, blank=True)
+    needs_review = models.BooleanField(default=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['company__name', 'category__sort_order', 'category__name', 'name']
+        indexes = [
+            models.Index(fields=['company', 'status', 'is_available']),
+            models.Index(fields=['company', 'needs_review']),
+            models.Index(fields=['company', 'is_featured']),
+        ]
+
+    def __str__(self):
+        return f'{self.company.name}: {self.name}'
+
+
+class CatalogImportJob(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        RENDERING = 'rendering', 'Rendering'
+        EXTRACTING = 'extracting', 'Extracting'
+        REVIEW = 'review', 'Ready for Review'
+        DONE = 'done', 'Done'
+        FAILED = 'failed', 'Failed'
+
+    class RenderMode(models.TextChoices):
+        STATIC = 'static', 'Static HTML'
+        HEADLESS = 'headless', 'Headless browser'
+        API = 'api', 'Captured API'
+
+    company = models.ForeignKey(
+        'tenants.Company',
+        on_delete=models.CASCADE,
+        related_name='catalog_imports',
+    )
+    source_url = models.URLField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    render_mode = models.CharField(max_length=20, choices=RenderMode.choices, default=RenderMode.STATIC)
+    raw_html = models.TextField(blank=True)
+    screenshot = models.ImageField(upload_to=catalog_import_screenshot_upload_path, null=True, blank=True)
+    captured_api = models.JSONField(default=dict, blank=True)
+    items_found = models.PositiveIntegerField(default=0)
+    log = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['company', 'status']),
+            models.Index(fields=['source_url']),
+        ]
+
+    def __str__(self):
+        return f'{self.company.name}: {self.source_url} ({self.status})'
 
 
 class Conversation(models.Model):

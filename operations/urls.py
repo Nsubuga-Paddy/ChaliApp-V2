@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     CompanyInsightsView,
+    CompanyMenuView,
     CompanyMediaViewSet,
     ConversationDetailView,
     ConversationMessagesPageView,
@@ -69,5 +70,6 @@ urlpatterns = [
     ),
     path('staff/conversations/', StaffConversationListView.as_view(), name='staff-conversation-list'),
     path('staff/insights/', CompanyInsightsView.as_view(), name='company-insights'),
+    path('companies/<int:company_id>/menu/', CompanyMenuView.as_view(), name='company-menu'),
     path('', include(router.urls)),
 ]

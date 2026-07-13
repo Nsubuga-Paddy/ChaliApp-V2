@@ -3,7 +3,7 @@ import logging
 from datetime import timedelta
 
 from django.core.files.base import ContentFile
-from django.db.models import Avg, Count, Sum
+from django.db.models import Avg, Count, Q, Sum
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from rest_framework import generics, permissions, status, viewsets
@@ -27,6 +27,7 @@ from .models import (
     CompanyMedia,
     Conversation,
     FollowUp,
+    MenuItem,
     Message,
     Order,
     Ticket,
@@ -40,6 +41,7 @@ from .serializers import (
     ConversationListSerializer,
     EndCallSessionSerializer,
     FollowUpSerializer,
+    MenuItemSerializer,
     MessageSerializer,
     OrderSerializer,
     RealtimeToolCallSerializer,
@@ -556,6 +558,60 @@ class CustomerBookingViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return Booking.objects.filter(customer=self.request.user)
+
+
+# --- Customer-facing catalog ---
+
+
+class CompanyMenuView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, company_id):
+        from tenants.models import Company
+
+        try:
+            company = Company.objects.get(pk=company_id, is_active=True)
+        except Company.DoesNotExist as exc:
+            raise NotFound('Company not found.') from exc
+
+        items = (
+            MenuItem.objects.filter(
+                company=company,
+                status=MenuItem.Status.PUBLISHED,
+                is_available=True,
+            )
+            .select_related('category', 'branch')
+            .order_by('category__sort_order', 'category__name', 'name')
+        )
+        category_filter = request.query_params.get('category')
+        if category_filter:
+            items = items.filter(category__name__icontains=category_filter)
+        search = request.query_params.get('search')
+        if search:
+            items = items.filter(
+                Q(name__icontains=search)
+                | Q(description__icontains=search)
+                | Q(category__name__icontains=search)
+            )
+
+        grouped = {}
+        for item in items:
+            key = item.category_id or 0
+            if key not in grouped:
+                grouped[key] = {
+                    'id': item.category_id,
+                    'name': item.category.name if item.category else 'Menu',
+                    'items': [],
+                }
+            grouped[key]['items'].append(MenuItemSerializer(item, context={'request': request}).data)
+
+        return Response(
+            {
+                'company_id': company.id,
+                'company_name': company.name,
+                'categories': list(grouped.values()),
+            }
+        )
 
 
 # --- Media ---

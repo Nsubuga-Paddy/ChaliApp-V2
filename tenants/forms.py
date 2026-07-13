@@ -38,9 +38,11 @@ class CompanyAIConfigAdminForm(forms.ModelForm):
         return list(dict.fromkeys(selected))
 
     def _validate_tools_for_company(self, company, selected):
-        if 'lookup_order' in selected and not company.enable_orders:
+        order_tools = {'lookup_order', 'list_menu', 'search_menu_items'}
+        selected_order_tools = order_tools.intersection(selected)
+        if selected_order_tools and not company.enable_orders:
             raise ValidationError(
-                'Look up order requires "Enable orders" to be checked on the company.'
+                'Order and menu tools require "Enable orders" to be checked on the company.'
             )
         if 'lookup_booking' in selected and not company.enable_bookings:
             raise ValidationError(

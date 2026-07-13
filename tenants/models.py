@@ -83,6 +83,8 @@ class CompanyAIConfig(models.Model):
     class ToolChoice(models.TextChoices):
         SEARCH_KNOWLEDGE_BASE = 'search_knowledge_base', 'Search knowledge base'
         CREATE_TICKET = 'create_ticket', 'Create support ticket'
+        LIST_MENU = 'list_menu', 'List menu items'
+        SEARCH_MENU_ITEMS = 'search_menu_items', 'Search menu items'
         LOOKUP_ORDER = 'lookup_order', 'Look up order'
         LOOKUP_BOOKING = 'lookup_booking', 'Look up booking'
 

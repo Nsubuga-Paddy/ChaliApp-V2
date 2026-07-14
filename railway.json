@@ -1,7 +1,7 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "deploy": {
-    "startCommand": "python manage.py migrate && python manage.py collectstatic --noinput && gunicorn chalimobile.wsgi:application --bind 0.0.0.0:$PORT",
+    "startCommand": "sh -c 'case \"${SERVICE_ROLE:-web}\" in worker) exec celery -A chalimobile worker -l info;; beat) exec celery -A chalimobile beat -l info;; *) python manage.py migrate && python manage.py collectstatic --noinput && exec gunicorn chalimobile.wsgi:application --bind 0.0.0.0:$PORT;; esac'",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }

@@ -27,6 +27,10 @@ from .models import KnowledgeChunk, KnowledgeSourceDocument, KnowledgeWebSource
 logger = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT = 'ChaliKnowledgeCrawler/1.0 (+company-approved-knowledge-refresh)'
+BROWSER_USER_AGENT = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+)
 
 # Maximum size for a single crawled PDF (25 MB).  Larger files are skipped to
 # avoid unexpected storage and processing costs.
@@ -93,13 +97,54 @@ NOISE_SELECTORS = (
     'nav',
     'header',
     'footer',
-    '.menu',
     '.navigation',
     '.breadcrumb',
     '.social',
     '.cookie',
     '.cookie-banner',
     '#cookie-notice',
+)
+CONTENT_ROOT_SELECTORS = (
+    'main',
+    'article',
+    '[role="main"]',
+    '#content',
+    '#main-content',
+    '#block-system-main',
+    '.region-content',
+    '.layout-content',
+    '.node__content',
+    '.entry-content',
+    '.page-content',
+    '.content-area',
+    '.field--name-body',
+    '.field-body',
+    '.field-item',
+    '.field__item',
+    'section',
+    'div.content',
+    'div.main-content',
+    'div[class*="content"]',
+    'div[class*="main"]',
+)
+TEXT_TAGS = (
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'p',
+    'li',
+    'td',
+    'th',
+    'dd',
+    'dt',
+    'blockquote',
+    'address',
+    'figcaption',
+    'label',
+    'summary',
 )
 
 
@@ -113,6 +158,8 @@ class FetchedPage:
     status_code: int
     content_type: str
     link_labels: dict[str, str] = field(default_factory=dict)
+    raw_html_length: int = 0
+    extraction_method: str = ''
 
 
 def normalize_url(url: str, base_url: str = '') -> str:
@@ -205,7 +252,8 @@ class WebSourceCrawler:
         if self.is_document_library:
             self.max_depth = max(self.max_depth, 1)
         self.session = requests.Session()
-        self.session.headers.update({'User-Agent': self.user_agent})
+        self.session.headers.update(self._default_request_headers())
+        self.browser_headers = self._browser_request_headers()
         self.robot_parser = self._load_robots()
         self.pdf_title_hints: dict[str, str] = {}
         self.stats = {
@@ -217,6 +265,25 @@ class WebSourceCrawler:
             'robots_blocked': 0,
             'external_links_skipped': 0,
             'binary_links_skipped': 0,
+            'last_empty_page': {},
+        }
+
+    def _default_request_headers(self) -> dict[str, str]:
+        return {
+            'User-Agent': self.user_agent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+
+    def _browser_request_headers(self) -> dict[str, str]:
+        browser_user_agent = (
+            getattr(settings, 'KNOWLEDGE_WEB_BROWSER_USER_AGENT', BROWSER_USER_AGENT)
+            or BROWSER_USER_AGENT
+        )
+        return {
+            'User-Agent': browser_user_agent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
         }
 
     def crawl(self) -> tuple[list[FetchedPage], list[str]]:
@@ -282,6 +349,16 @@ class WebSourceCrawler:
                 self.stats['html_pages_with_text'] += 1
             else:
                 self.stats['empty_html_pages'] += 1
+                self.stats['last_empty_page'] = {
+                    'url': url,
+                    'status_code': page.status_code,
+                    'content_type': page.content_type,
+                    'html_length': page.raw_html_length,
+                    'title': page.title,
+                    'extraction_method': page.extraction_method,
+                    'text_length': len(page.text or ''),
+                    'text_preview': (page.text or '')[:240],
+                }
 
             if depth >= self.max_depth:
                 continue
@@ -308,6 +385,23 @@ class WebSourceCrawler:
         return pages, pdf_urls
 
     def no_indexable_content_message(self) -> str:
+        diagnostics = self.stats.get('last_empty_page') or {}
+        diagnostic_bits = []
+        if diagnostics:
+            diagnostic_bits.append(
+                'Last fetch: '
+                f"url={diagnostics.get('url', '')}, "
+                f"status={diagnostics.get('status_code', '')}, "
+                f"content_type={diagnostics.get('content_type', '')}, "
+                f"html_length={diagnostics.get('html_length', 0)}, "
+                f"title={diagnostics.get('title', '')!r}, "
+                f"extraction={diagnostics.get('extraction_method', '') or 'none'}, "
+                f"text_length={diagnostics.get('text_length', 0)}"
+            )
+            preview = diagnostics.get('text_preview') or ''
+            if preview:
+                diagnostic_bits.append(f"text_preview={preview!r}")
+        diagnostic_text = ' '.join(diagnostic_bits)
         return (
             'No indexable text or PDF documents were found at this URL. '
             f"Crawl stats: visited={self.stats['visited']}, fetched={self.stats['fetched']}, "
@@ -316,9 +410,10 @@ class WebSourceCrawler:
             f"robots_blocked={self.stats['robots_blocked']}, "
             f"external_links_skipped={self.stats['external_links_skipped']}, "
             f"binary_links_skipped={self.stats['binary_links_skipped']}. "
+            f"{diagnostic_text} "
             'Possible causes: JavaScript-rendered content, login/cookie/Cloudflare gate, '
             'robots.txt restrictions, PDF links on another domain, or download URLs that hide the PDF.'
-        )
+        ).strip()
 
     def fetch_pdf_bytes(self, url: str) -> bytes | None:
         """Download a PDF URL and return its raw bytes, or None if it should be skipped.
@@ -415,15 +510,37 @@ class WebSourceCrawler:
             content_type='',
         )
 
+    def _should_retry_with_browser(self, page: FetchedPage) -> bool:
+        browser_ua = (self.browser_headers.get('User-Agent') or '').strip()
+        session_ua = (self.session.headers.get('User-Agent') or '').strip()
+        if not browser_ua or browser_ua == session_ua:
+            return False
+        if page.text:
+            return False
+        if is_pdf_response(page.content_type):
+            return False
+        if page.status_code >= 400:
+            return False
+        # Only retry when we received HTML but failed to extract text (likely bot wall).
+        return page.raw_html_length >= 500
+
     def _fetch_page(self, url: str) -> FetchedPage:
+        page = self._fetch_page_with_headers(url, self.session.headers)
+        if self._should_retry_with_browser(page):
+            browser_page = self._fetch_page_with_headers(url, self.browser_headers)
+            if browser_page.text:
+                return browser_page
+        return page
+
+    def _fetch_page_with_headers(self, url: str, headers: dict[str, str]) -> FetchedPage:
         request_timeout = (10, self.timeout)
         try:
-            response = self.session.get(url, timeout=request_timeout)
+            response = self.session.get(url, timeout=request_timeout, headers=headers)
             response.raise_for_status()
         except (ssl.SSLError, requests.exceptions.SSLError) as exc:
             logger.warning('SSL error fetching page %s: %s — retrying with verify=False', url, exc)
             try:
-                response = self.session.get(url, timeout=request_timeout, verify=False)
+                response = self.session.get(url, timeout=request_timeout, headers=headers, verify=False)
                 response.raise_for_status()
             except (
                 socket.timeout,
@@ -446,6 +563,7 @@ class WebSourceCrawler:
         except requests.exceptions.RequestException as exc:
             logger.warning('Failed to fetch page %s: %s — skipping', url, exc)
             return self._empty_page(url)
+
         content_type = response.headers.get('content-type', '')
         response_content = getattr(response, 'content', b'')
         if not isinstance(response_content, (bytes, bytearray)):
@@ -463,42 +581,69 @@ class WebSourceCrawler:
                 links=[],
                 status_code=response.status_code,
                 content_type='application/pdf',
+                raw_html_length=len(response_content),
             )
-        text = response.text
-        return extract_html_page(text, url, response.status_code, content_type)
+
+        response.encoding = response.apparent_encoding or response.encoding or 'utf-8'
+        html_text = response.text or ''
+        return extract_html_page(html_text, url, response.status_code, content_type)
 
 
-def extract_html_page(html_text: str, url: str, status_code: int, content_type: str) -> FetchedPage:
+def _minimal_noise_soup(html_text: str) -> BeautifulSoup:
     soup = BeautifulSoup(html_text or '', 'lxml')
+    for tag in soup(['script', 'style', 'noscript', 'svg']):
+        tag.decompose()
+    return soup
+
+
+def _remove_layout_noise(soup: BeautifulSoup) -> None:
     for selector in NOISE_SELECTORS:
         for element in soup.select(selector):
             element.decompose()
 
-    title = ''
-    if soup.title and soup.title.string:
-        title = clean_text(soup.title.string)
-    if not title:
-        h1 = soup.find('h1')
-        title = clean_text(h1.get_text(' ')) if h1 else url
 
-    main = (
-        soup.find('main')
-        or soup.find('article')
-        or soup.find('div', class_=re.compile('content|main|body', re.I))
-        or soup.body
-        or soup
-    )
-    headings = [
-        clean_text(node.get_text(' '))
-        for node in main.find_all(['h1', 'h2', 'h3'])
-        if clean_text(node.get_text(' '))
-    ]
+def _find_content_root(soup: BeautifulSoup):
+    best_node = None
+    best_text_len = 0
+    for selector in CONTENT_ROOT_SELECTORS:
+        for node in soup.select(selector):
+            text_len = len(_extract_text_from_node(node))
+            if text_len > best_text_len:
+                best_text_len = text_len
+                best_node = node
+    if best_node is not None:
+        return best_node
+    return soup.body or soup
+
+
+def _dedupe_preserve(values: list[str]) -> list[str]:
+    seen = set()
+    ordered = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _extract_text_from_node(node) -> str:
+    if node is None:
+        return ''
+
     parts = []
-    for node in main.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'li', 'td', 'th'], recursive=True):
-        value = clean_text(node.get_text(' '))
-        if value and len(value) > 2:
+    for element in node.find_all(TEXT_TAGS, recursive=True):
+        value = clean_text(element.get_text(' ', strip=True))
+        if len(value) > 2:
             parts.append(value)
-    text = clean_text(' '.join(parts) or main.get_text(' '))
+
+    if parts:
+        return clean_text('\n'.join(_dedupe_preserve(parts)))
+
+    return clean_text(node.get_text(' ', strip=True))
+
+
+def _extract_links(soup: BeautifulSoup) -> tuple[list[str], dict[str, str]]:
     links = []
     link_labels = {}
     for anchor in soup.find_all('a'):
@@ -511,6 +656,90 @@ def extract_html_page(html_text: str, url: str, status_code: int, content_type: 
         links.append(href)
         if label:
             link_labels[href] = label
+    return links, link_labels
+
+
+def _page_title(soup: BeautifulSoup, fallback_url: str) -> str:
+    if soup.title and soup.title.string:
+        title = clean_text(soup.title.string)
+        if title:
+            return title
+    h1 = soup.find('h1')
+    if h1:
+        title = clean_text(h1.get_text(' '))
+        if title:
+            return title
+    return fallback_url
+
+
+def _meta_description_text(soup: BeautifulSoup) -> str:
+    for selector, attr in (
+        ('meta[name="description"]', 'content'),
+        ('meta[property="og:description"]', 'content'),
+    ):
+        tag = soup.select_one(selector)
+        if tag and tag.get(attr):
+            text = clean_text(tag[attr])
+            if len(text) > 20:
+                return text
+    return ''
+
+
+def _extract_page_text(html_text: str) -> tuple[str, str]:
+    """Try multiple extraction strategies and return the best non-empty result."""
+    candidates: list[tuple[str, str]] = []
+
+    gentle_soup = _minimal_noise_soup(html_text)
+    content_soup = _minimal_noise_soup(html_text)
+    _remove_layout_noise(content_soup)
+
+    content_root = _find_content_root(content_soup)
+    content_text = _extract_text_from_node(content_root)
+    if content_text:
+        candidates.append(('content_root', content_text))
+
+    if content_soup.body is not None:
+        body_layout_text = _extract_text_from_node(content_soup.body)
+        if body_layout_text:
+            candidates.append(('body_layout', body_layout_text))
+
+    if gentle_soup.body is not None:
+        body_gentle_text = _extract_text_from_node(gentle_soup.body)
+        if body_gentle_text:
+            candidates.append(('body_gentle', body_gentle_text))
+
+    document_text = _extract_text_from_node(gentle_soup)
+    if document_text:
+        candidates.append(('document', document_text))
+
+    meta_text = _meta_description_text(gentle_soup)
+    if meta_text:
+        candidates.append(('meta_description', meta_text))
+
+    if not candidates:
+        return '', ''
+
+    method, text = max(candidates, key=lambda item: len(item[1]))
+    return text, method
+
+
+def extract_html_page(html_text: str, url: str, status_code: int, content_type: str) -> FetchedPage:
+    raw_html_length = len(html_text or '')
+    gentle_soup = _minimal_noise_soup(html_text)
+    content_soup = _minimal_noise_soup(html_text)
+    _remove_layout_noise(content_soup)
+
+    title = _page_title(gentle_soup, url)
+    links, link_labels = _extract_links(gentle_soup)
+    text, extraction_method = _extract_page_text(html_text)
+
+    content_root = _find_content_root(content_soup)
+    headings = [
+        clean_text(node.get_text(' '))
+        for node in content_root.find_all(['h1', 'h2', 'h3'])
+        if clean_text(node.get_text(' '))
+    ]
+
     return FetchedPage(
         url=url,
         title=title,
@@ -520,6 +749,8 @@ def extract_html_page(html_text: str, url: str, status_code: int, content_type: 
         status_code=status_code,
         content_type=content_type,
         link_labels=link_labels,
+        raw_html_length=raw_html_length,
+        extraction_method=extraction_method,
     )
 
 

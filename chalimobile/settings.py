@@ -54,6 +54,11 @@ KNOWLEDGE_WEB_USER_AGENT = os.getenv(
     'KNOWLEDGE_WEB_USER_AGENT',
     'ChaliKnowledgeCrawler/1.0 (+company-approved-knowledge-refresh)',
 )
+KNOWLEDGE_WEB_BROWSER_USER_AGENT = os.getenv(
+    'KNOWLEDGE_WEB_BROWSER_USER_AGENT',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+)
 KNOWLEDGE_WEB_PENDING_STALE_MINUTES = int(os.getenv('KNOWLEDGE_WEB_PENDING_STALE_MINUTES', '10'))
 KNOWLEDGE_WEB_CRAWLING_STALE_MINUTES = int(os.getenv('KNOWLEDGE_WEB_CRAWLING_STALE_MINUTES', '45'))
 

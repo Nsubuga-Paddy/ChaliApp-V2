@@ -22,6 +22,7 @@ from .models import (
 from .services import search_knowledge_base
 from .web_ingestion import (
     WebSourceCrawler,
+    extract_html_page,
     index_web_source,
     is_pdf_url,
     refresh_due_web_sources,
@@ -262,10 +263,61 @@ class KnowledgeWebSourceTests(TestCase):
     def _mock_response(self, html):
         response = Mock()
         response.text = html
+        response.content = html.encode('utf-8') if isinstance(html, str) else b''
         response.status_code = 200
         response.headers = {'content-type': 'text/html'}
+        response.encoding = 'utf-8'
+        response.apparent_encoding = 'utf-8'
         response.raise_for_status = Mock()
         return response
+
+    def test_extract_html_page_handles_section_lists_without_main(self):
+        page = extract_html_page(
+            '''
+            <html>
+              <head><title>Emergency Contact | Makerere University</title></head>
+              <body>
+                <nav>Home Study at Mak</nav>
+                <div class="region-content">
+                  <h2>In the Event of an Emergency</h2>
+                  <p>The campus community will be notified through the web and email.</p>
+                  <h3>Essential Contacts</h3>
+                  <ul>
+                    <li>Vice Chancellor's Office - 0414-542803</li>
+                    <li>University Hospital - 041 542922</li>
+                  </ul>
+                </div>
+              </body>
+            </html>
+            ''',
+            'https://www.mak.ac.ug/emergency-contact',
+            200,
+            'text/html',
+        )
+
+        self.assertIn('Essential Contacts', page.text)
+        self.assertIn('0414-542803', page.text)
+        self.assertIn('University Hospital', page.text)
+        self.assertTrue(page.extraction_method)
+
+    def test_extract_html_page_falls_back_to_body_when_layout_noise_strips_main(self):
+        page = extract_html_page(
+            '''
+            <html><body>
+              <header><h1>Site Header</h1></header>
+              <div class="content-area">
+                <h2>About Us</h2>
+                <p>We provide electricity distribution services across Uganda.</p>
+              </div>
+            </body></html>
+            ''',
+            'https://example.com/about',
+            200,
+            'text/html',
+        )
+
+        self.assertIn('electricity distribution', page.text)
+        self.assertIn('About Us', page.text)
 
     @patch('tenants.web_ingestion.WebSourceCrawler._load_robots')
     @patch('tenants.web_ingestion.requests.Session.get')

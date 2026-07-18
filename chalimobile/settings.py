@@ -156,6 +156,43 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = Path(os.getenv('MEDIA_ROOT', BASE_DIR / 'media'))
 SERVE_MEDIA = env_bool('SERVE_MEDIA', DEBUG)
 
+# ── File storage ──────────────────────────────────────────────────────────────
+# Web and celery-worker run in separate ephemeral containers with isolated
+# filesystems. Using S3-compatible object storage (Railway buckets) ensures
+# both processes read/write the same files, and that files persist across
+# restarts and scale across replicas.
+if os.getenv('AWS_STORAGE_BUCKET_NAME'):
+    # Use S3 storage for production
+    STORAGES = {
+        'default': {
+            'BACKEND': 'storages.backends.s3boto3.S3Boto3Storage',
+            'OPTIONS': {
+                'bucket_name': os.getenv('AWS_STORAGE_BUCKET_NAME'),
+                'access_key': os.getenv('AWS_ACCESS_KEY_ID'),
+                'secret_key': os.getenv('AWS_SECRET_ACCESS_KEY'),
+                'region_name': os.getenv('AWS_S3_REGION_NAME', 'auto'),
+                'endpoint_url': os.getenv('AWS_S3_ENDPOINT_URL'),
+                'signature_version': 's3v4',
+            }
+        },
+        'staticfiles': {
+            'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+        },
+    }
+else:
+    # Use default filesystem storage for local development
+    STORAGES = {
+        'default': {
+            'BACKEND': 'django.core.files.storage.FileSystemStorage',
+            'OPTIONS': {
+                'location': MEDIA_ROOT,
+            }
+        },
+        'staticfiles': {
+            'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+        },
+    }
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {

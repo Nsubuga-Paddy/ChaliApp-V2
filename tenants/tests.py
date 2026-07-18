@@ -3,13 +3,14 @@ from django.contrib.admin.sites import AdminSite
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from io import BytesIO
 from rest_framework.test import APIClient
 from unittest.mock import Mock, patch
 from datetime import timedelta
 
 from .admin import CompanyAIConfigInline, CompanyAdmin
 from .forms import CompanyAIConfigAdminForm
-from .ingestion import index_legacy_document
+from .ingestion import extract_docx_sections, index_legacy_document
 from .models import (
     Company,
     CompanyAIConfig,
@@ -223,6 +224,47 @@ class KnowledgeSourcePermissionTests(TestCase):
         self.assertEqual(response.data['status'], 'indexed')
         self.assertEqual(KnowledgeChunk.objects.filter(company=self.company_a).count(), 1)
         self.assertEqual(KnowledgeChunk.objects.filter(company=self.company_b).count(), 0)
+
+    def test_empty_upload_is_not_marked_indexed(self):
+        upload = SimpleUploadedFile(
+            'blank.txt',
+            b'   \n\t   ',
+            content_type='text/plain',
+        )
+
+        response = self.client.post(
+            '/api/staff/knowledge-sources/',
+            {'title': 'Blank', 'file': upload, 'is_published': True},
+            format='multipart',
+            HTTP_X_COMPANY_ID=str(self.company_a.id),
+        )
+
+        self.assertEqual(response.status_code, 201)
+        source = KnowledgeSourceDocument.objects.get(company=self.company_a, title='Blank')
+        self.assertEqual(source.status, KnowledgeSourceDocument.Status.FAILED)
+        self.assertIn('No extractable text chunks', source.error_message)
+        self.assertEqual(KnowledgeChunk.objects.filter(source_document=source).count(), 0)
+
+    def test_docx_extraction_reads_bytes_and_tables(self):
+        from docx import Document
+
+        document = Document()
+        document.add_heading('Staff Contacts', level=1)
+        document.add_paragraph('Main lecturer resource document.')
+        table = document.add_table(rows=2, cols=2)
+        table.cell(0, 0).text = 'Name'
+        table.cell(0, 1).text = 'Email'
+        table.cell(1, 0).text = 'Dr. Jane Doe'
+        table.cell(1, 1).text = 'jane@example.com'
+        buffer = BytesIO()
+        document.save(buffer)
+
+        sections = extract_docx_sections(buffer.getvalue())
+        text = '\n'.join(section.text for section in sections)
+
+        self.assertIn('Main lecturer resource document', text)
+        self.assertIn('Dr. Jane Doe', text)
+        self.assertIn('jane@example.com', text)
 
     def test_staff_cannot_upload_to_company_without_membership(self):
         upload = SimpleUploadedFile(

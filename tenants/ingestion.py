@@ -3,6 +3,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 from django.conf import settings
@@ -46,6 +47,8 @@ def index_source_document(source: KnowledgeSourceDocument) -> KnowledgeSourceDoc
         content_hash = hashlib.sha256(raw).hexdigest()
         sections = extract_source_sections(source, raw)
         chunks = build_chunks(sections)
+        if not chunks:
+            raise ValueError('No extractable text chunks were produced from this document.')
         embeddings = embed_texts([chunk['text'] for chunk in chunks])
 
         with transaction.atomic():
@@ -173,29 +176,29 @@ def extract_source_sections(
     if source.file_type == KnowledgeSourceDocument.FileType.TXT:
         return [ExtractedSection(text=raw.decode('utf-8', errors='ignore'), heading=source.title)]
     if source.file_type == KnowledgeSourceDocument.FileType.PDF:
-        return extract_pdf_sections(source.file.path)
+        return extract_pdf_sections(raw)
     if source.file_type == KnowledgeSourceDocument.FileType.DOCX:
-        return extract_docx_sections(source.file.path)
+        return extract_docx_sections(raw)
     if source.file_type == KnowledgeSourceDocument.FileType.PPTX:
-        return extract_pptx_sections(source.file.path)
+        return extract_pptx_sections(raw)
     raise ValueError(f'Unsupported knowledge source file type: {source.file_type}')
 
 
-def extract_pdf_sections(path: str) -> list[ExtractedSection]:
+def extract_pdf_sections(raw: bytes) -> list[ExtractedSection]:
     try:
         from pypdf import PdfReader
     except ImportError as exc:
         raise RuntimeError('PDF extraction requires pypdf. Install project requirements.') from exc
 
-    reader = PdfReader(path)
+    reader = PdfReader(BytesIO(raw))
     sections = []
     page_count = len(reader.pages)
     for index, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ''
         normalized = normalize_text(text)
         if len(normalized) < PDF_OCR_MIN_TEXT_CHARS:
-            logger.info('Running OCR for PDF page %s/%s: %s', index, page_count, path)
-            ocr_text = extract_pdf_page_ocr(path, index)
+            logger.info('Running OCR for PDF page %s/%s', index, page_count)
+            ocr_text = extract_pdf_page_ocr(raw, index)
             if ocr_text:
                 text = ocr_text
         if text.strip():
@@ -203,15 +206,15 @@ def extract_pdf_sections(path: str) -> list[ExtractedSection]:
     return sections
 
 
-def extract_pdf_page_ocr(path: str, page_number: int) -> str:
+def extract_pdf_page_ocr(raw: bytes, page_number: int) -> str:
     if not getattr(settings, 'OPENAI_API_KEY', ''):
         logger.warning('Skipping OCR for PDF page %s; OPENAI_API_KEY is not configured.', page_number)
         return ''
 
     try:
-        image_bytes = render_pdf_page_png(path, page_number)
+        image_bytes = render_pdf_page_png(raw, page_number)
     except Exception:
-        logger.exception('Failed to render PDF page %s for OCR: %s', page_number, path)
+        logger.exception('Failed to render PDF page %s for OCR.', page_number)
         return ''
 
     try:
@@ -249,57 +252,73 @@ def extract_pdf_page_ocr(path: str, page_number: int) -> str:
         )
         return normalize_text(response.choices[0].message.content or '')
     except Exception:
-        logger.exception('OpenAI OCR failed for PDF page %s: %s', page_number, path)
+        logger.exception('OpenAI OCR failed for PDF page %s.', page_number)
         return ''
 
 
-def render_pdf_page_png(path: str, page_number: int) -> bytes:
+def render_pdf_page_png(raw: bytes, page_number: int) -> bytes:
     try:
         import fitz
     except ImportError as exc:
         raise RuntimeError('Scanned PDF OCR requires PyMuPDF. Install project requirements.') from exc
 
-    with fitz.open(path) as document:
+    with fitz.open(stream=raw, filetype='pdf') as document:
         page = document.load_page(page_number - 1)
         matrix = fitz.Matrix(PDF_OCR_RENDER_SCALE, PDF_OCR_RENDER_SCALE)
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
         return pixmap.tobytes('png')
 
 
-def extract_docx_sections(path: str) -> list[ExtractedSection]:
+def extract_docx_sections(raw: bytes) -> list[ExtractedSection]:
     try:
         from docx import Document
     except ImportError as exc:
         raise RuntimeError('DOCX extraction requires python-docx. Install project requirements.') from exc
 
-    document = Document(path)
+    document = Document(BytesIO(raw))
     sections = []
     heading = ''
     buffer = []
+
+    def flush_buffer() -> None:
+        nonlocal buffer
+        if buffer:
+            sections.append(ExtractedSection(text='\n'.join(buffer), heading=heading))
+            buffer = []
+
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         if not text:
             continue
         style_name = (paragraph.style.name or '').lower()
         if 'heading' in style_name:
-            if buffer:
-                sections.append(ExtractedSection(text='\n'.join(buffer), heading=heading))
-                buffer = []
+            flush_buffer()
             heading = text
         else:
             buffer.append(text)
-    if buffer:
-        sections.append(ExtractedSection(text='\n'.join(buffer), heading=heading))
+
+    for table in document.tables:
+        rows = []
+        for row in table.rows:
+            cells = [normalize_text(cell.text) for cell in row.cells]
+            row_text = ' | '.join(cell for cell in cells if cell)
+            if row_text:
+                rows.append(row_text)
+        if rows:
+            flush_buffer()
+            sections.append(ExtractedSection(text='\n'.join(rows), heading=heading or 'Table'))
+
+    flush_buffer()
     return sections
 
 
-def extract_pptx_sections(path: str) -> list[ExtractedSection]:
+def extract_pptx_sections(raw: bytes) -> list[ExtractedSection]:
     try:
         from pptx import Presentation
     except ImportError as exc:
         raise RuntimeError('PPTX extraction requires python-pptx. Install project requirements.') from exc
 
-    presentation = Presentation(path)
+    presentation = Presentation(BytesIO(raw))
     sections = []
     for slide_index, slide in enumerate(presentation.slides, start=1):
         texts = []

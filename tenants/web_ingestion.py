@@ -26,11 +26,12 @@ from .models import KnowledgeChunk, KnowledgeSourceDocument, KnowledgeWebSource
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_AGENT = 'ChaliKnowledgeCrawler/1.0 (+company-approved-knowledge-refresh)'
+DEFAULT_USER_AGENT = 'ChaliKnowledgeIndexer/1.0 (+company-approved-knowledge-refresh)'
 BROWSER_USER_AGENT = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 )
+ROBOTS_TEXT_MAX_BYTES = 512 * 1024
 
 # Maximum size for a single crawled PDF (25 MB).  Larger files are skipped to
 # avoid unexpected storage and processing costs.
@@ -231,6 +232,9 @@ class WebSourceCrawler:
         self.timeout = getattr(settings, 'KNOWLEDGE_WEB_TIMEOUT_SECONDS', 20)
         self.request_delay = getattr(settings, 'KNOWLEDGE_WEB_REQUEST_DELAY_SECONDS', 0.5)
         self.user_agent = getattr(settings, 'KNOWLEDGE_WEB_USER_AGENT', DEFAULT_USER_AGENT)
+        self.obey_robots = getattr(settings, 'KNOWLEDGE_WEB_OBEY_ROBOTS', False)
+        self.robots_url = urljoin(self.start_url, '/robots.txt')
+        self.robots_last_error = ''
         self.is_document_library = (
             source.crawl_mode == KnowledgeWebSource.CrawlMode.DOCUMENT_LIBRARY
         )
@@ -266,6 +270,7 @@ class WebSourceCrawler:
             'external_links_skipped': 0,
             'binary_links_skipped': 0,
             'last_empty_page': {},
+            'last_robots_block': {},
         }
 
     def _default_request_headers(self) -> dict[str, str]:
@@ -321,8 +326,19 @@ class WebSourceCrawler:
             self.stats['visited'] += 1
 
             if not self._can_fetch(url):
-                logger.info('Robots.txt disallowed crawl for %s', url)
+                logger.info(
+                    'Robots.txt disallowed crawl for %s (robots_url=%s, user_agent=%s)',
+                    url,
+                    self.robots_url,
+                    self.user_agent,
+                )
                 self.stats['robots_blocked'] += 1
+                self.stats['last_robots_block'] = {
+                    'url': url,
+                    'robots_url': self.robots_url,
+                    'user_agent': self.user_agent,
+                    'robots_last_error': self.robots_last_error,
+                }
                 continue
 
             # PDF links: collect for later ingestion, do not parse as HTML.
@@ -386,7 +402,18 @@ class WebSourceCrawler:
 
     def no_indexable_content_message(self) -> str:
         diagnostics = self.stats.get('last_empty_page') or {}
+        robots_diagnostics = self.stats.get('last_robots_block') or {}
         diagnostic_bits = []
+        if robots_diagnostics:
+            diagnostic_bits.append(
+                'Robots block: '
+                f"url={robots_diagnostics.get('url', '')}, "
+                f"robots_url={robots_diagnostics.get('robots_url', '')}, "
+                f"user_agent={robots_diagnostics.get('user_agent', '')!r}"
+            )
+            robots_error = robots_diagnostics.get('robots_last_error') or ''
+            if robots_error:
+                diagnostic_bits.append(f"robots_error={robots_error!r}")
         if diagnostics:
             diagnostic_bits.append(
                 'Last fetch: '
@@ -411,8 +438,8 @@ class WebSourceCrawler:
             f"external_links_skipped={self.stats['external_links_skipped']}, "
             f"binary_links_skipped={self.stats['binary_links_skipped']}. "
             f"{diagnostic_text} "
-            'Possible causes: JavaScript-rendered content, login/cookie/Cloudflare gate, '
-            'robots.txt restrictions, PDF links on another domain, or download URLs that hide the PDF.'
+            'Possible causes: robots.txt restrictions, JavaScript-rendered content, '
+            'login/cookie/Cloudflare gate, PDF links on another domain, or download URLs that hide the PDF.'
         ).strip()
 
     def fetch_pdf_bytes(self, url: str) -> bytes | None:
@@ -485,15 +512,52 @@ class WebSourceCrawler:
 
     def _load_robots(self):
         parser = RobotFileParser()
-        robots_url = urljoin(self.start_url, '/robots.txt')
+        if not self.obey_robots:
+            parser.allow_all = True
+            return parser
+
         try:
-            parser.set_url(robots_url)
-            parser.read()
-        except Exception:
-            logger.info('Could not read robots.txt for %s', self.start_url)
+            response = self.session.get(
+                self.robots_url,
+                timeout=(5, min(self.timeout, 10)),
+                headers=self._default_request_headers(),
+            )
+            if response.status_code == 404:
+                parser.allow_all = True
+                return parser
+            response.raise_for_status()
+        except (
+            socket.timeout,
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.RequestException,
+        ) as exc:
+            self.robots_last_error = str(exc)
+            logger.info('Could not read robots.txt for %s: %s', self.start_url, exc)
+            parser.allow_all = True
+            return parser
+
+        content_type = response.headers.get('content-type', '').lower()
+        raw_content = response.content[:ROBOTS_TEXT_MAX_BYTES]
+        response.encoding = response.apparent_encoding or response.encoding or 'utf-8'
+        robots_text = response.text[:ROBOTS_TEXT_MAX_BYTES]
+
+        if 'html' in content_type or b'<html' in raw_content.lower():
+            self.robots_last_error = f'Ignoring non-robots HTML response from {self.robots_url}'
+            logger.info(self.robots_last_error)
+            parser.allow_all = True
+            return parser
+        if not robots_text.strip():
+            parser.allow_all = True
+            return parser
+
+        parser.set_url(self.robots_url)
+        parser.parse(robots_text.splitlines())
         return parser
 
     def _can_fetch(self, url: str) -> bool:
+        if not self.obey_robots:
+            return True
         try:
             return self.robot_parser.can_fetch(self.user_agent, url)
         except Exception:

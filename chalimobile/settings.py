@@ -52,8 +52,9 @@ KNOWLEDGE_DOCUMENT_LIBRARY_MAX_PAGES_CAP = int(
 )
 KNOWLEDGE_WEB_USER_AGENT = os.getenv(
     'KNOWLEDGE_WEB_USER_AGENT',
-    'ChaliKnowledgeCrawler/1.0 (+company-approved-knowledge-refresh)',
+    'ChaliKnowledgeIndexer/1.0 (+company-approved-knowledge-refresh)',
 )
+KNOWLEDGE_WEB_OBEY_ROBOTS = env_bool('KNOWLEDGE_WEB_OBEY_ROBOTS', False)
 KNOWLEDGE_WEB_BROWSER_USER_AGENT = os.getenv(
     'KNOWLEDGE_WEB_BROWSER_USER_AGENT',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '

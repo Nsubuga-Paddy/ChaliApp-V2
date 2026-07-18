@@ -444,6 +444,72 @@ class KnowledgeWebSourceTests(TestCase):
         self.assertIn('Crawl stats:', source.last_error)
         self.assertIn('empty_html_pages=1', source.last_error)
 
+    @override_settings(KNOWLEDGE_WEB_OBEY_ROBOTS=False)
+    @patch('tenants.web_ingestion.WebSourceCrawler._load_robots')
+    @patch('tenants.web_ingestion.requests.Session.get')
+    def test_web_source_bypasses_robots_for_company_approved_sources(self, mock_get, mock_robots):
+        robot = Mock()
+        robot.can_fetch.return_value = False
+        mock_robots.return_value = robot
+        mock_get.return_value = self._mock_response(
+            '<html><body><main><h1>Burgers</h1><p>Classic Burger costs UGX 45,000.</p></main></body></html>'
+        )
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='Banana Burgers',
+            url='https://example.com/burgers',
+        )
+
+        index_web_source(source)
+
+        source.refresh_from_db()
+        self.assertEqual(source.status, KnowledgeWebSource.Status.INDEXED)
+        self.assertIn('Classic Burger', KnowledgeChunk.objects.get(web_source=source).text)
+        robot.can_fetch.assert_not_called()
+
+    @override_settings(KNOWLEDGE_WEB_OBEY_ROBOTS=True)
+    @patch('tenants.web_ingestion.WebSourceCrawler._load_robots')
+    @patch('tenants.web_ingestion.requests.Session.get')
+    def test_robot_blocks_record_clear_diagnostics(self, mock_get, mock_robots):
+        robot = Mock()
+        robot.can_fetch.return_value = False
+        mock_robots.return_value = robot
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='Blocked',
+            url='https://example.com/blocked',
+        )
+
+        index_web_source(source)
+
+        source.refresh_from_db()
+        self.assertEqual(source.status, KnowledgeWebSource.Status.FAILED)
+        self.assertIn('robots_blocked=1', source.last_error)
+        self.assertIn('fetched=0', source.last_error)
+        self.assertIn('Robots block:', source.last_error)
+        self.assertIn('https://example.com/robots.txt', source.last_error)
+        mock_get.assert_not_called()
+
+    @override_settings(KNOWLEDGE_WEB_OBEY_ROBOTS=True)
+    @patch('tenants.web_ingestion.requests.Session.get')
+    def test_html_robots_response_is_ignored_instead_of_false_blocking(self, mock_get):
+        robots_response = self._mock_response('<html><body>Access denied</body></html>')
+        page_response = self._mock_response(
+            '<html><body><main><h1>About</h1><p>Approved knowledge page text.</p></main></body></html>'
+        )
+        mock_get.side_effect = [robots_response, page_response]
+        source = KnowledgeWebSource.objects.create(
+            company=self.company_a,
+            title='About',
+            url='https://example.com/about',
+        )
+
+        index_web_source(source)
+
+        source.refresh_from_db()
+        self.assertEqual(source.status, KnowledgeWebSource.Status.INDEXED)
+        self.assertEqual(mock_get.call_count, 2)
+
     @patch('tenants.web_ingestion.WebSourceCrawler._load_robots')
     @patch('tenants.web_ingestion.requests.Session.get')
     def test_pdf_content_type_url_is_discovered_without_pdf_extension(self, mock_get, mock_robots):
